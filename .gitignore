@@ -1,0 +1,4 @@
+build/
+*.bem
+*.bem.zip
+*.o

@@ -1,0 +1,8 @@
+Third-party notices
+
+cJSON (src/third_party/cJSON.{c,h})
+  Copyright (c) 2009-2017 Dave Gamble and cJSON contributors
+  MIT License — see the header of cJSON.c for the full text.
+
+BEN catalog data is NOT bundled. It is supplied by the user and remains
+AGPL-3.0-only, Copyright Dr-hydra / Better Endfield contributors.
