@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -164,6 +165,405 @@ static void writeBem(const string& path, const vector<uint8_t>& manifest, const 
     writeFile(path, out);
 }
 
+
+// ============================ EFF Format 3 加载 ============================
+// EFF .effres kind=1 的 payload = 原生 Unity 输入 + EFFMESH v6 作者快照。
+// EFFMESH 是完整几何（位置/法线/切线/UV/index/skin/bone paths），直接用于 BEM。
+struct EffSkin { float w[4]; uint32_t b[4]; };
+struct EffSub { int topology; uint32_t start, count, base, first, vcount; };
+struct EffMesh {
+    int version = 0;
+    string coordinate, source, name;
+    int vcount = 0, icount = 0;
+    vector<float> pos, nrm, tan, col;
+    vector<vector<float>> uv = vector<vector<float>>(8);
+    vector<uint32_t> idx;
+    vector<EffSub> subs;
+    vector<EffSkin> skin;
+    vector<string> bonePaths;
+};
+
+struct EffReader {
+    const vector<uint8_t>& d; size_t p = 0;
+    EffReader(const vector<uint8_t>& data) : d(data) {}
+    void need(size_t n) { if (p + n > d.size()) throw runtime_error("truncated EFFMESH"); }
+    uint8_t u8() { need(1); return d[p++]; }
+    int32_t i32() { need(4); int32_t v; memcpy(&v, &d[p], 4); p += 4; return v; }
+    uint32_t u32() { need(4); uint32_t v; memcpy(&v, &d[p], 4); p += 4; return v; }
+    float f32() { need(4); float v; memcpy(&v, &d[p], 4); p += 4; return v; }
+    string str() {
+        uint64_t n = 0; int shift = 0;
+        while (true) { uint8_t b = u8(); n |= uint64_t(b & 0x7f) << shift; if (!(b & 0x80)) break; shift += 7; if (shift > 28) throw runtime_error("bad EFFMESH string"); }
+        need((size_t)n); string s((const char*)&d[p], (size_t)n); p += (size_t)n; return s;
+    }
+    vector<float> floats() {
+        int n = i32(); if (n < 0) throw runtime_error("bad EFFMESH float count");
+        need((size_t)n * 4); vector<float> v((size_t)n);
+        if (n) memcpy(v.data(), &d[p], (size_t)n * 4); p += (size_t)n * 4; return v;
+    }
+    vector<uint32_t> u32s() {
+        int n = i32(); if (n < 0) throw runtime_error("bad EFFMESH uint count");
+        need((size_t)n * 4); vector<uint32_t> v((size_t)n);
+        if (n) memcpy(v.data(), &d[p], (size_t)n * 4); p += (size_t)n * 4; return v;
+    }
+    void skip(size_t n) { need(n); p += n; }
+};
+
+static EffMesh decodeEffMeshData(const vector<uint8_t>& b) {
+    EffReader r(b);
+    const uint8_t magic[8] = {'E','F','F','M','E','S','H',0};
+    r.need(8); if (memcmp(&b[0], magic, 8)) throw runtime_error("not EFFMESH");
+    r.p = 8;
+    EffMesh m; m.version = r.i32();
+    m.coordinate = r.str(); m.source = r.str(); m.name = r.str();
+    m.vcount = r.i32(); if (m.vcount < 0) throw runtime_error("bad EFFMESH vertex count");
+    m.pos = r.floats(); m.nrm = r.floats(); m.tan = r.floats(); m.col = r.floats();
+    for (int i = 0; i < 8; i++) m.uv[i] = r.floats();
+    m.icount = r.i32(); if (m.icount < 0) throw runtime_error("bad EFFMESH index count");
+    r.need((size_t)m.icount * 4); m.idx.resize((size_t)m.icount);
+    if (m.icount) memcpy(m.idx.data(), &b[r.p], (size_t)m.icount * 4); r.p += (size_t)m.icount * 4;
+    int subn = r.i32(); if (subn < 0) throw runtime_error("bad EFFMESH submesh count");
+    for (int i = 0; i < subn; i++) { EffSub s; s.topology = r.i32(); s.start = r.u32(); s.count = r.u32(); s.base = r.u32(); s.first = r.u32(); s.vcount = r.u32(); m.subs.push_back(s); }
+    int skn = r.i32(); if (skn < 0) throw runtime_error("bad EFFMESH skin count");
+    for (int i = 0; i < skn; i++) { EffSkin s{}; for (float &w : s.w) w = r.f32(); for (uint32_t &x : s.b) x = r.u32(); m.skin.push_back(s); }
+    int bindn = r.i32(); if (bindn < 0) throw runtime_error("bad EFFMESH bindpose count"); r.skip((size_t)bindn * 64);
+    int hashn = r.i32(); if (hashn < 0) throw runtime_error("bad EFFMESH bone hash count"); r.skip((size_t)hashn * 4);
+    int pathn = r.i32(); if (pathn < 0) throw runtime_error("bad EFFMESH bone path count");
+    for (int i = 0; i < pathn; i++) m.bonePaths.push_back(r.str());
+    if ((int)m.pos.size() < m.vcount * 3) throw runtime_error("EFFMESH position incomplete");
+    if (!m.nrm.empty() && (int)m.nrm.size() < m.vcount * 3) throw runtime_error("EFFMESH normal incomplete");
+    if (!m.tan.empty() && (int)m.tan.size() < m.vcount * 4) throw runtime_error("EFFMESH tangent incomplete");
+    if (!m.uv[0].empty() && (int)m.uv[0].size() < m.vcount * 2) throw runtime_error("EFFMESH uv incomplete");
+    return m;
+}
+
+static EffMesh readEffMesh(const string& path) {
+    auto b = readFile(path);
+    if (b.size() < 72 || memcmp(b.data(), "EFF_AUTHOR_FILE3", 16)) throw runtime_error("not EFF_AUTHOR_FILE3: " + path);
+    if (rd32(b, 16) != 3) throw runtime_error("unsupported EFF version");
+    if (rd32(b, 20) != 1) throw runtime_error("not a Mesh EFF resource: " + path);
+    uint64_t meta = 0, pay = 0; memcpy(&meta, &b[24], 8); memcpy(&pay, &b[32], 8);
+    if (72 + meta + pay != b.size()) throw runtime_error("EFF mesh extent differs: " + path);
+    vector<uint8_t> payload(b.begin() + 72 + meta, b.end());
+    const uint8_t magic[8] = {'E','F','F','M','E','S','H',0};
+    auto it = std::search(payload.begin(), payload.end(), magic, magic + 8);
+    if (it == payload.end()) throw runtime_error("EFFMESH snapshot not found in " + path);
+    vector<uint8_t> author(it, payload.end());
+    return decodeEffMeshData(author);
+}
+
+static string effKey(const Ini& ini, const string& sec, const string& key) {
+    auto s = ini.sec.find(sec); if (s == ini.sec.end()) return "";
+    auto i = s->second.find(key); if (i != s->second.end()) return i->second;
+    for (auto& kv : s->second) if (kv.first.size() == key.size()) {
+        bool eq = true; for (size_t j = 0; j < key.size(); j++) if (tolower((unsigned char)kv.first[j]) != tolower((unsigned char)key[j])) { eq = false; break; }
+        if (eq) return kv.second;
+    }
+    return "";
+}
+static bool effSection(const Ini& ini, const string& sec, map<string,string>& out) {
+    auto it = ini.sec.find(sec); if (it == ini.sec.end()) return false; out = it->second; return true;
+}
+static vector<string> effSplit(const string& s, char c) {
+    vector<string> out; string cur;
+    for (char ch : s) { if (ch == c) { if (!cur.empty()) out.push_back(cur); cur.clear(); } else cur += ch; }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+// 按 catalog 的 mesh_name 选择角色（EFF target.asset 就是 mesh_name）
+static Cat loadCatalogByMeshes(const string& dir, const set<string>& meshes) {
+    Cat best; int bestHit = -1;
+    for (auto& p : fs::directory_iterator(dir)) {
+        if (p.path().extension() != ".json") continue;
+        auto txt = readFile(p.path().string());
+        cJSON* root = cJSON_ParseWithLength((const char*)txt.data(), txt.size());
+        if (!root) continue;
+        auto kind = get(root, "kind");
+        if (!cJSON_IsString(kind) || string(kind->valuestring) != "bem-character-catalog") { cJSON_Delete(root); continue; }
+        auto comps = get(root, "components"); int hit = 0;
+        if (cJSON_IsObject(comps)) for (auto* c = comps->child; c; c = c->next) {
+            auto mn = get(c, "mesh_name"); if (cJSON_IsString(mn) && meshes.count(mn->valuestring)) hit++;
+        }
+        if (hit > bestHit) {
+            if (best.root) cJSON_Delete(best.root);
+            best.root = root; bestHit = hit; best.character = jstr(root, "character_id");
+            best.comps = comps; best.entries = get(root, "entries"); best.textures = get(root, "textures");
+        } else cJSON_Delete(root);
+    }
+    if (!best.root || bestHit <= 0) throw runtime_error("no BEN catalog character matched EFF targets");
+    best.ids.clear();
+    for (auto* c = best.comps->child; c; c = c->next) best.ids.push_back(stoi(string(c->string)));
+    sort(best.ids.begin(), best.ids.end());
+    best.base.resize(best.ids.size()); int acc = 0;
+    for (size_t i = 0; i < best.ids.size(); i++) {
+        best.base[i] = acc; acc += cJSON_GetArraySize(get(cJSON_GetObjectItemCaseSensitive(best.comps, to_string(best.ids[i]).c_str()), "bone_names"));
+    }
+    best.totalBones = acc;
+    return best;
+}
+
+static int effCid(Cat& cat, const string& meshName) {
+    for (int cid : cat.ids) {
+        auto* c = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
+        if (jstr(c, "mesh_name") == meshName) return cid;
+    }
+    return -1;
+}
+static bool effFindBone(Cat& cat, const string& path, int prefer, int& ocid, int& oidx) {
+    // EFF 的辅助骨骼（飘带/裙摆）未必出现在 BEN 目标组件里；从叶子往上找最近祖先，
+    // 保证 cloth 能跟随父骨骼动，而不是整块部件被丢掉。
+    auto tryComp = [&](int cid, const string& name) -> bool {
+        auto* c = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
+        auto* bn = get(c, "bone_names"); int n = cJSON_GetArraySize(bn);
+        for (int i = 0; i < n; i++) { auto* x = cJSON_GetArrayItem(bn, i); if (cJSON_IsString(x) && name == x->valuestring) { ocid = cid; oidx = i; return true; } }
+        return false;
+    };
+    vector<string> segs = effSplit(path, '/');
+    for (int i = (int)segs.size() - 1; i >= 0; i--) {
+        if (prefer >= 0 && tryComp(prefer, segs[i])) return true;
+        for (int cid : cat.ids) if (cid != prefer && tryComp(cid, segs[i])) return true;
+    }
+    return false;
+}
+static bool effCatalogTexture(Cat& cat, const string& name, string& original) {
+    if (!cJSON_IsObject(cat.textures)) return false;
+    for (auto* t = cat.textures->child; t; t = t->next) { auto* n = get(t, "name"); if (cJSON_IsString(n) && name == n->valuestring) { original = n->valuestring; return true; } }
+    return false;
+}
+
+static int convertEff(const string& dir, const string& catDir, const string& out) {
+    auto ini = Ini::parse(dir + "/mod.ini");
+    auto format = effKey(ini, "Mod", "format");
+    if (format != "3") throw runtime_error("not an EFF format-3 package (format=" + format + ")");
+
+    // resources
+    struct EffTex { string dds, asset; };
+    struct EffMat { string asset; vector<pair<string,string>> slots; };
+    map<string, EffTex> tex;
+    map<string, EffMat> mat;
+    map<string, string> meshPath;
+    map<string, string> partMesh, partMat;
+    vector<string> replaceKeys;
+    set<string> targetMeshes;
+    for (auto& s : ini.order) {
+        map<string,string> d; effSection(ini, s, d);
+        if (s.rfind("Texture", 0) == 0 && s.rfind("TextureOverride", 0) != 0) {
+            auto dds = effKey(ini, s, "dds"), asset = effKey(ini, s, "source.asset");
+            if (!dds.empty()) tex[s] = {dds, asset};
+        } else if (s.rfind("Material", 0) == 0 && s.rfind("MaterialTrack", 0) != 0) {
+            EffMat m; m.asset = effKey(ini, s, "source.asset");
+            for (auto& kv : d) if (kv.first.rfind("texture.", 0) == 0) m.slots.push_back({kv.first, kv.second});
+            if (!m.asset.empty()) mat[s] = m;
+        } else if (s.rfind("Mesh", 0) == 0) {
+            auto p = effKey(ini, s, "path"); if (!p.empty()) meshPath[s] = p;
+        } else if (s.rfind("Part", 0) == 0) {
+            partMesh[s] = effKey(ini, s, "mesh"); partMat[s] = effKey(ini, s, "material");
+        } else if (s.rfind("Replace", 0) == 0) {
+            replaceKeys.push_back(s);
+            auto h = effKey(ini, s, "handling");
+            auto ta = effKey(ini, s, "target.asset");
+            if (h != "skip" && !ta.empty()) targetMeshes.insert(ta);
+        }
+    }
+    auto cat = loadCatalogByMeshes(catDir, targetMeshes);
+    cout << "target: " << cat.character << " (" << jstr(cat.root, "name") << "), target meshes " << targetMeshes.size() << "\n";
+
+    vector<vector<uint8_t>> payloads;
+    auto addPayload = [&](vector<uint8_t> b) { payloads.push_back(std::move(b)); return (int)payloads.size() - 1; };
+    cJSON* jtextures = jarr();
+    map<string,int> texIndex; // original_name -> textures[] index
+    auto addTexture = [&](const string& asset, const string& ddsPath) -> int {
+        auto it = texIndex.find(asset); if (it != texIndex.end()) return it->second;
+        string original;
+        if (!effCatalogTexture(cat, asset, original)) return -1;
+        Dds d;
+        try { d = readDds(ddsPath); } catch (exception& e) { cerr << "texture skip " << asset << ": " << e.what() << "\n"; return -1; }
+        int pid = addPayload(d.data);
+        cJSON* t = obj(nullptr);
+        cJSON_AddNumberToObject(t, "width", d.w); cJSON_AddNumberToObject(t, "height", d.h);
+        cJSON_AddNumberToObject(t, "mips", d.mips); cJSON_AddNumberToObject(t, "format", d.fmt);
+        cJSON_AddBoolToObject(t, "srgb", d.srgb); cJSON_AddStringToObject(t, "original_name", original.c_str());
+        cJSON_AddNumberToObject(t, "payload", pid); jadd(jtextures, t);
+        int idx = cJSON_GetArraySize(jtextures) - 1; texIndex[asset] = idx; return idx;
+    };
+
+    cJSON* jmeshes = jarr();
+    map<int,int> meshIndex;
+    map<int,int> cidToMesh;
+    // 先决定目标/部件，再逐个目标合并
+    for (auto& rkey : replaceKeys) {
+        if (effKey(ini, rkey, "handling") == "skip") continue;
+        string targetAsset = effKey(ini, rkey, "target.asset");
+        int cid = effCid(cat, targetAsset);
+        if (cid < 0) { cout << "skip replace " << rkey << ": no catalog component for " << targetAsset << "\n"; continue; }
+        auto parts = effSplit(effKey(ini, rkey, "parts"), ',');
+        if (parts.empty()) { cout << "skip replace " << rkey << ": no parts\n"; continue; }
+
+        vector<uint8_t> s0, s1, s2; vector<uint32_t> indices;
+        vector<cJSON*> bones; map<pair<int,int>,int> pal; bool ok = true; bool anyColor = false; int totalIdx = 0;
+        cJSON* jdraws = jarr();
+        for (auto& pname : parts) {
+            auto meshSec = partMesh.count(pname) ? partMesh[pname] : "";
+            if (meshSec.empty() || !meshPath.count(meshSec)) { cout << "skip part " << pname << ": no mesh path\n"; ok = false; break; }
+            EffMesh m;
+            try { m = readEffMesh(dir + "/" + meshPath[meshSec]); }
+            catch (exception& e) { cout << "skip part " << pname << ": " << e.what() << "\n"; ok = false; break; }
+            if (m.vcount <= 0 || m.idx.empty()) { cout << "skip part " << pname << ": empty mesh\n"; ok = false; break; }
+            // 材质/贴图
+            auto mname = partMat.count(pname) ? partMat[pname] : "";
+            EffMat em; if (mat.count(mname)) em = mat[mname];
+            auto* comp = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
+            auto* mats = get(comp, "materials"); int slot = 0; string materialName = jstr(comp, "materials") ;
+            auto* m0 = cJSON_GetArrayItem(mats, 0); if (m0) materialName = m0->valuestring;
+            for (int i = 0; i < cJSON_GetArraySize(mats); i++) { auto* x = cJSON_GetArrayItem(mats, i); if (cJSON_IsString(x) && em.asset == x->valuestring) { slot = i; materialName = x->valuestring; break; } }
+            cJSON* jtexIds = jarr(); set<int> seenTex;
+            for (auto& [prop, ts] : em.slots) {
+                auto it = tex.find(ts); if (it == tex.end()) continue;
+                auto tpath = it->second.dds; if (tpath.empty()) continue;
+                int ti = addTexture(it->second.asset, dir + "/" + tpath);
+                if (ti >= 0 && !seenTex.count(ti)) { seenTex.insert(ti); jadd(jtexIds, jnum(ti)); }
+            }
+            // 骨骼 palette
+            vector<int> local(m.bonePaths.size(), -1);
+            if (m.bonePaths.empty()) { cout << "skip part " << pname << ": no bones\n"; ok = false; break; }
+            for (size_t bi = 0; bi < m.bonePaths.size(); bi++) {
+                int ocid, oidx;
+                if (!effFindBone(cat, m.bonePaths[bi], cid, ocid, oidx)) { cout << "skip part " << pname << ": bone not in catalog: " << m.bonePaths[bi] << "\n"; ok = false; break; }
+                auto key = make_pair(ocid, oidx);
+                auto it = pal.find(key);
+                if (it == pal.end()) {
+                    int pi = (int)pal.size(); if (pi > 255) { ok = false; break; }
+                    pal[key] = pi; local[bi] = pi;
+                    auto* oc = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(ocid).c_str());
+                    auto* bn = get(oc, "bone_names"); auto* nm = cJSON_GetArrayItem(bn, oidx);
+                    cJSON* b = obj(nullptr); cJSON_AddNumberToObject(b, "component", ocid); cJSON_AddNumberToObject(b, "index", oidx); cJSON_AddStringToObject(b, "name", nm->valuestring);
+                    bones.push_back(b);
+                } else local[bi] = it->second;
+            }
+            if (!ok) break;
+            if (!m.col.empty()) anyColor = true;
+            size_t baseVert = s0.size() / 40;
+            for (int v = 0; v < m.vcount; v++) {
+                auto pushf = [&](vector<uint8_t>& dst, float x) { uint8_t b[4]; memcpy(b, &x, 4); dst.insert(dst.end(), b, b + 4); };
+                // stream0: position, normal, tangent
+                for (int k = 0; k < 3; k++) pushf(s0, m.pos[v*3+k]);
+                for (int k = 0; k < 3; k++) pushf(s0, m.nrm.empty() ? 0.f : m.nrm[v*3+k]);
+                for (int k = 0; k < 4; k++) pushf(s0, m.tan.empty() ? (k == 3 ? 1.f : 0.f) : m.tan[v*4+k]);
+                // stream1: uv0 (+color if present)
+                for (int k = 0; k < 2; k++) pushf(s1, m.uv[0].empty() ? 0.f : m.uv[0][v*2+k]);
+                for (int k = 0; k < 4; k++) pushf(s1, m.col.empty() ? (k == 3 ? 1.f : 0.f) : m.col[v*4+k]);
+                // stream2: u16 weights + u8 palette
+                float w[4] = {1,0,0,0}; uint32_t gb[4] = {0,0,0,0};
+                if (v < (int)m.skin.size()) { for (int k = 0; k < 4; k++) { w[k] = m.skin[v].w[k]; gb[k] = m.skin[v].b[k]; } }
+                for (int k = 0; k < 4; k++) {
+                    float f = std::max(0.f, std::min(1.f, w[k])); uint16_t u = (uint16_t)std::lround(f * 65535.f);
+                    s2.push_back(u & 255); s2.push_back(u >> 8);
+                }
+                for (int k = 0; k < 4; k++) {
+                    int pi = 0;
+                    if (gb[k] < local.size() && local[gb[k]] >= 0 && w[k] > 0.f) pi = local[gb[k]];
+                    s2.push_back((uint8_t)pi);
+                }
+            }
+            size_t baseIdx = indices.size();
+            for (uint32_t x : m.idx) indices.push_back(x + (uint32_t)baseVert);
+            cJSON* jd = obj(nullptr);
+            cJSON_AddNumberToObject(jd, "start", (int)baseIdx); cJSON_AddNumberToObject(jd, "count", (int)m.idx.size());
+            cJSON_AddNumberToObject(jd, "material_component", cid); cJSON_AddNumberToObject(jd, "material_slot", slot);
+            cJSON_AddStringToObject(jd, "material_name", materialName.c_str()); cJSON_AddItemToObject(jd, "textures", jtexIds);
+            jadd(jdraws, jd); totalIdx += (int)m.idx.size();
+            cout << "part " << pname << ": v=" << m.vcount << " idx=" << m.idx.size() << " bonePalette=" << pal.size() << " tex=" << cJSON_GetArraySize(jtexIds) << "\n";
+        }
+        if (!ok || totalIdx == 0) { cout << "skip target " << targetAsset << ": incomplete\n"; continue; }
+
+        // BEM 1.0 skin 要求 12 字节：UNorm16 x4 + UInt8 x4
+        cJSON* jattrs = jarr();
+        auto attr = [&](int sem, int fmt, int dim, int stream, int off) { cJSON* a = jarr(); jadd(a,jnum(sem)); jadd(a,jnum(fmt)); jadd(a,jnum(dim)); jadd(a,jnum(stream)); jadd(a,jnum(off)); jadd(jattrs,a); };
+        attr(0,0,3,0,0); attr(1,0,3,0,12); attr(2,0,4,0,24);
+        int s1stride = anyColor ? 24 : 8;
+        attr(4,0,2,1,0);
+        if (anyColor) attr(3,0,4,1,8);
+        attr(12,4,4,2,0); attr(13,6,4,2,8);
+        cJSON* jstreams = jarr();
+        auto stream = [&](int stride, int payload) { cJSON* x = obj(nullptr); cJSON_AddNumberToObject(x,"stride",stride); cJSON_AddNumberToObject(x,"payload",payload); jadd(jstreams,x); };
+        int p0 = addPayload(s0), p1 = addPayload(s1), p2 = addPayload(s2);
+        vector<uint8_t> ib(indices.size()*4); if (!indices.empty()) memcpy(ib.data(), indices.data(), ib.size());
+        int pib = addPayload(ib);
+        stream(40,p0); stream(s1stride,p1); stream(12,p2);
+        cJSON* jmesh = obj(nullptr);
+        cJSON_AddNumberToObject(jmesh,"vertex_count",(int)(s0.size()/40));
+        cJSON_AddNumberToObject(jmesh,"index_size",4);
+        cJSON_AddItemToObject(jmesh,"streams",jstreams);
+        cJSON_AddItemToObject(jmesh,"attributes",jattrs);
+        cJSON* jbones = jarr(); for (auto* b : bones) jadd(jbones,b); cJSON_AddItemToObject(jmesh,"bones",jbones);
+        cJSON_AddNumberToObject(jmesh,"indices",pib); cJSON_AddNumberToObject(jmesh,"index_count",totalIdx);
+        cJSON_AddItemToObject(jmesh,"draws",jdraws);
+        cidToMesh[cid] = cJSON_GetArraySize(jmeshes); jadd(jmeshes,jmesh);
+    }
+
+    // target + appearance
+    cJSON* jtarget = obj(nullptr);
+    cJSON_AddStringToObject(jtarget,"character_id",cat.character.c_str());
+    cJSON_AddStringToObject(jtarget,"platform","windows-x64");
+    cJSON_AddStringToObject(jtarget,"profile_id",jstr(cat.root,"profile_id").c_str());
+    cJSON_AddStringToObject(jtarget,"revision",jstr(cat.root,"revision").c_str());
+    cJSON_AddStringToObject(jtarget,"snapshot","");
+    cJSON_AddStringToObject(jtarget,"world_resource",jstr(cat.root,"world_resource").c_str());
+    cJSON_AddStringToObject(jtarget,"ui_resource",jstr(cat.root,"ui_resource").c_str());
+    cJSON* jcomps = jarr();
+    for (int cid : cat.ids) {
+        auto* c = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
+        cJSON* x = obj(nullptr); cJSON_AddNumberToObject(x,"id",cid);
+        cJSON_AddStringToObject(x,"mesh_name",jstr(c,"mesh_name").c_str());
+        cJSON_AddNumberToObject(x,"original_index_count",jint(c,"original_index_count"));
+        cJSON* bn = jarr(); for (auto* b = get(c,"bone_names")->child; b; b = b->next) jadd(bn,jstrv(b->valuestring)); cJSON_AddItemToObject(x,"bone_names",bn);
+        cJSON* mm = jarr(); for (auto* m = get(c,"materials")->child; m; m = m->next) jadd(mm,jstrv(m->valuestring)); cJSON_AddItemToObject(x,"materials",mm);
+        jadd(jcomps,x);
+    }
+    cJSON_AddItemToObject(jtarget,"components",jcomps);
+    cJSON* japps = jarr(); cJSON* japp = obj(nullptr);
+    cJSON_AddStringToObject(japp,"id","default"); cJSON_AddStringToObject(japp,"name","默认外观");
+    cJSON* jac = jarr();
+    for (int cid : cat.ids) {
+        cJSON* x = obj(nullptr); cJSON_AddNumberToObject(x,"target",cid);
+        auto it = cidToMesh.find(cid);
+        if (it == cidToMesh.end()) cJSON_AddStringToObject(x,"operation","keep");
+        else { cJSON_AddStringToObject(x,"operation","replace"); cJSON_AddNumberToObject(x,"mesh",it->second); }
+        jadd(jac,x);
+    }
+    cJSON_AddItemToObject(japp,"components",jac); jadd(japps,japp);
+
+    cJSON* mroot = obj(nullptr);
+    cJSON_AddNumberToObject(mroot,"schema",1);
+    cJSON_AddStringToObject(mroot,"package_id",("c4ben."+cat.character).c_str());
+    cJSON_AddStringToObject(mroot,"name",("Converter4BENExt EFF: "+fs::path(dir).filename().string()).c_str());
+    cJSON_AddStringToObject(mroot,"author","Converter4BENExt");
+    cJSON_AddStringToObject(mroot,"version","0.1.0");
+    cJSON* caps = jarr(); for (auto s : {"native-materials","palette-u8","indices-u32","fixed-appearances"}) jadd(caps,jstrv(s));
+    cJSON_AddItemToObject(mroot,"required_capabilities",caps);
+    cJSON_AddItemToObject(mroot,"target",jtarget);
+    cJSON_AddItemToObject(mroot,"meshes",jmeshes);
+    cJSON_AddItemToObject(mroot,"textures",jtextures);
+    cJSON_AddStringToObject(mroot,"default_appearance_id","default");
+    cJSON_AddItemToObject(mroot,"appearances",japps);
+    char* json = cJSON_PrintUnformatted(mroot); if (!json) throw runtime_error("manifest serialize failed");
+    vector<uint8_t> manifest((uint8_t*)json, (uint8_t*)json + strlen(json)); free(json);
+    writeBem(out, manifest, payloads);
+    cout << "written " << out << ": meshes=" << cJSON_GetArraySize(jmeshes) << " textures=" << cJSON_GetArraySize(jtextures) << " payloads=" << payloads.size() << "\n";
+    cJSON_Delete(mroot); cJSON_Delete(cat.root);
+    return 0;
+}
+
+
+static int effiComponentMid(const string& s) {
+    const char* a = "TextureOverride_EntryPoint_Component";
+    const char* b = "TextureOverride_Component";
+    if (s.rfind(a, 0) == 0) return atoi(s.c_str() + strlen(a));
+    if (s.rfind(b, 0) == 0) return atoi(s.c_str() + strlen(b));
+    return -1;
+}
+
 int main(int argc, char** argv) {
     try {
         if (argc < 2 || string(argv[1]) != "convert") {
@@ -178,9 +578,10 @@ int main(int argc, char** argv) {
         }
         if (dir.empty() || catDir.empty() || out.empty()) { cerr << "missing args\n"; return 2; }
         auto ini = Ini::parse(dir + "/mod.ini");
+        if (effKey(ini, "Mod", "format") == "3") return convertEff(dir, catDir, out);
         vector<string> hashes;
         for (auto& s : ini.order) {
-            if (s.rfind("TextureOverride_EntryPoint_Component", 0) != 0) continue;
+            if (effiComponentMid(s) < 0) continue;
             auto it = ini.sec[s].find("hash"); if (it != ini.sec[s].end()) hashes.push_back(lower(it->second));
         }
         auto cat = loadCatalog(catDir, hashes);
@@ -189,8 +590,8 @@ int main(int argc, char** argv) {
         // map mod component -> catalog component id
         map<int, int> mod2cat;
         for (auto& s : ini.order) {
-            if (s.rfind("TextureOverride_EntryPoint_Component", 0) != 0) continue;
-            int mid = stoi(s.substr(strlen("TextureOverride_EntryPoint_Component")));
+            int mid = effiComponentMid(s);
+            if (mid < 0) continue;
             auto it = ini.sec[s].find("hash"); if (it == ini.sec[s].end()) continue;
             auto h = lower(it->second); auto e = cJSON_GetObjectItemCaseSensitive(cat.entries, h.c_str());
             if (cJSON_IsNumber(e)) mod2cat[mid] = e->valueint;
@@ -247,7 +648,7 @@ int main(int argc, char** argv) {
             };
             int s0, s1, s2, sib; vector<uint8_t> vb0, vb1, vb2, ib;
             rd(nvb0, s0, vb0); rd(nvb1, s1, vb1); rd(nvb2, s2, vb2); rd(nib, sib, ib);
-            if (s2 != 16 && s2 != 8) { cout << "skip comp " << mid << ": VB2 stride " << s2 << "\n"; continue; }
+            if (s2 != 16 && s2 != 8 && s2 != 12) { cout << "skip comp " << mid << ": VB2 stride " << s2 << "\n"; continue; }
             int nv = (int)vb0.size() / s0;
             if ((int)vb2.size() != nv * s2 || (int)vb1.size() != nv * s1) { cout << "skip comp " << mid << ": buffer mismatch\n"; continue; }
             int ni = (int)ib.size() / 2;
@@ -261,6 +662,10 @@ int main(int argc, char** argv) {
                 if (s2 == 16) for (int k = 0; k < 4; k++) {
                     w[k] = (uint16_t)(vb2[v*16 + k*2] | (vb2[v*16 + k*2 + 1] << 8));
                     gi[k] = (uint16_t)(vb2[v*16 + 8 + k*2] | (vb2[v*16 + 8 + k*2 + 1] << 8));
+                } else if (s2 == 12) {
+                    // 旧 EFMI ALPHA：u16 权重 + u8 组件本地骨骼索引
+                    for (int k = 0; k < 4; k++) w[k] = (uint16_t)(vb2[v*12 + k*2] | (vb2[v*12 + k*2 + 1] << 8));
+                    for (int k = 0; k < 4; k++) gi[k] = vb2[v*12 + 8 + k];
                 } else {
                     w[0] = 65535;
                     gi[0] = (uint16_t)(vb2[v*8] | (vb2[v*8 + 1] << 8));
@@ -269,7 +674,11 @@ int main(int argc, char** argv) {
                 for (int k = 0; k < 4; k++) {
                     if (gi[k] == 0 && w[k] == 0) continue;
                     int owner, local;
-                    if (!ownerOf(gi[k], owner, local)) { ok = false; break; }
+                    if (s2 == 12) {
+                        owner = cid; local = (int)gi[k];
+                        auto* cc = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
+                        if (local >= cJSON_GetArraySize(get(cc, "bone_names"))) { ok = false; break; }
+                    } else if (!ownerOf(gi[k], owner, local)) { ok = false; break; }
                     auto key = make_pair(owner, local);
                     auto it = pal.find(key);
                     int pi;

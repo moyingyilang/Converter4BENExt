@@ -7,7 +7,7 @@
 
 - 语言：C++17（无 Python、无 .NET 运行时）
 - 依赖：clang++/gcc、zlib；cJSON 已 vendored（MIT）
-- 状态：**MVP**，EFMI 标准 ComponentN + 合并骨架已能出包；EFF 未实现
+- 状态：**MVP**。EFMI 标准 ComponentN + 合并骨架已能出包；EFF Format 3 已接入（实验性）
 
 ## 为什么只做迁移
 
@@ -40,9 +40,27 @@ make            # -> build/c4ben
 | `mi_fu_swimsuit151.7z`（弭弗） | `chr_0031_mifu` | 8/11 组件、4 贴图，部分 |
 | `nom_liino...rar`（梨诺） | `chr_0035_liino` | catalog 缺 hash，已判定不可交付 |
 
+## EFF Format 3（实验性）
+
+已经接入 `EFF_AUTHOR_FILE3` kind=1 的 EFFMESH v6 快照：
+
+- 读 `mod.ini`（`format=3`）的 `[Replace]` / `[Part]` / `[Mesh]` / `[Material]` / `[Texture]`
+- 从 `.effres` 的 payload 里找 `EFFMESH\0`，解析顶点/法线/切线/UV/index/skin/骨骼路径
+- 多个 `Part` 合并成一个 BEM 组件，按 catalog 的 `target.asset` 找角色
+- EFF 的辅助骨骼（飘带/裙摆）不在 BEN 目标组件时，从叶子往上找最近祖先，保证 cloth 仍跟随父骨骼
+- BEM 1.0 固定外观；EFF 物理/特效/blendshape/LOD 暂不转换
+
+已验证：
+
+- `lvtsfw.zip`（莱万汀）→ `lvtsfw.bem`，4 个 replace 组件，BEN `read_package` 通过
+- 旧版 EFMI（`TextureOverride_ComponentN`，VB2 stride12 = u16 权重 + u8 本地骨骼）已兼容；
+  `zhuangfangyi` 的 11 个组件 hash 与当前 catalog 全不匹配（旧游戏版本），不硬转
+
 ## 已知限制
 
-- EFF Format 3（`EFF_AUTHOR_FILE3`）还不支持；识别到会拒绝，不硬转。
+- EFF 的材质/贴图只在 catalog 里能找到同名 `source.asset` 时绑定；自定义 Liino 贴图会跳过。
+- EFF 辅助骨骼用祖先替代，会损失飘带/裙摆的二级摆动。
+- EFF 的 blendshape、物理、特效、LOD 不转。
 - EFMI 只支持标准 ComponentN；EFMI 选项/热键/多外观还没有映射到 BEM option_groups。
 - 合并不住的组件会 `keep`，不猜；catalog 缺 hash 的包不输出。
 - 二进制 payload 未压缩；大包会到几十 MB。
