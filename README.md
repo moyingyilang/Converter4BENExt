@@ -66,6 +66,12 @@ make            # -> build/c4ben
 - 二进制 payload 未压缩；大包会到几十 MB。
 - 只用 BEN 的读取器/校验器对拍，未替换 BEN 自己的转换器；实机渲染仍需作者验证。
 
+## Catalog 回填
+
+旧 mod 的 EFMI hash 随游戏版本变化；如果只有旧 mod、没有旧游戏资源，无法可靠映射。
+VFS 回填方案见 [`docs/CATALOG-BACKFILL.md`](docs/CATALOG-BACKFILL.md)：从旧版本 `.blc/.ab`
+抽原生资料 + 按 BEN 的 CRC32C 规则生成候选 catalog，交 BEN 复核。
+
 ## 路线
 
 1. `inspect`：先报告角色/组件/骨骼/贴图/catalog 缺口，不达标不出包
