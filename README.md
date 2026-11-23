@@ -42,7 +42,9 @@ make            # -> build/c4ben
 |---|---|---|
 | `edmin_maid.zip`（管理员女） | `chr_0003_endminf` | 9/11 组件、18 贴图，BEN `read_package` + `validate_manifest` 通过，已导入成功 |
 | `mi_fu_swimsuit151.7z`（弭弗） | `chr_0031_mifu` | 8/11 组件、4 贴图，部分 |
-| `nom_liino...rar`（梨诺） | `chr_0035_liino` | catalog 缺 hash，已判定不可交付 |
+| `YvonneSwimsuit.zip`（伊冯） | `chr_0017_yvonne` | 8 组件、18 贴图，校验通过 |
+| `Simplified_Fangyi.rar`（庄方宜） | `chr_0030_zhuangfy` | 8 组件、13 贴图，校验通过 |
+| `zhuangfangyi...` 旧 ALPHA-7 | `chr_0030_zhuangfy` | `--profile` 实验包，2 组件，仅用于验证兼容层 |
 
 ## EFF Format 3（实验性）
 
