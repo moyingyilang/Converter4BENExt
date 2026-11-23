@@ -1,7 +1,7 @@
 # Catalog 回填（VFS -> BEN catalog 候选）
 
 目标：用 ForTMR 的 VFS 解包能力，从**旧版本游戏包**恢复 BEN catalog 需要的原生资料，
-给 Converter4BENExt 提供旧版本的角色/组件/贴图身份，让旧 EFMI 包也能识别。
+给 Converter4BENeXt 提供旧版本的角色/组件/贴图身份，让旧 EFMI 包也能识别。
 
 不直接发布成 BEN 官方 catalog；输出标记 `candidate`，交 BEN 作者复核。
 

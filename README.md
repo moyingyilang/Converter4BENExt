@@ -1,4 +1,4 @@
-# Converter4BENExt
+# Converter4BENeXt
 
 **EFMI / EFF → BEN (`Better Endfield Next`) `.bem` 迁移工具。**
 
@@ -26,6 +26,10 @@ make            # -> build/c4ben
 ./build/c4ben convert <解压后的mod目录> \
     --catalog <BEN catalog目录> \
     --out <输出.bem>
+
+# 旧 EFMI（hash 对不上当前 catalog）
+./build/c4ben inspect-legacy <old-mod> --catalog <catalog> --character <chr_...> --out mapping.json
+./build/c4ben convert <old-mod> --catalog <catalog> --profile mapping.json --allow-review --out <输出.bem>
 ```
 
 - `<mod目录>` 需要有 `mod.ini`（EFMI 目录/解压后的包）。
@@ -55,6 +59,18 @@ make            # -> build/c4ben
 - `lvtsfw.zip`（莱万汀）→ `lvtsfw.bem`，4 个 replace 组件，BEN `read_package` 通过
 - 旧版 EFMI（`TextureOverride_ComponentN`，VB2 stride12 = u16 权重 + u8 本地骨骼）已兼容；
   `zhuangfangyi` 的 11 个组件 hash 与当前 catalog 全不匹配（旧游戏版本），不硬转
+
+## 旧 EFMI 兼容层
+
+旧包的组件 hash 不会命中新 catalog，不能按 hash 硬转。流程改成：
+
+1. `inspect-legacy` / `map`：拆出旧组件指纹（index 数、顶点数、骨骼范围、VB stride），
+   和指定角色的当前 catalog 打分，输出 `mapping.json` 草稿（`status: draft`、`needs_review`）
+2. `convert --profile mapping.json`：严格按映射转；组件/骨骼/贴图没有显式映射就拒绝
+3. `--allow-review` 只用于测试草稿，不要拿去直接分发
+
+当前实测：zhuangfangyi 的 11 个旧组件中，2 个能按 profile 转出（comp6→hair、comp9→face），
+其余因目标顶点布局 stride 不一致被拒绝；这是**预期行为**，不静默猜布局。
 
 ## 已知限制
 

@@ -1,4 +1,4 @@
-// Converter4BENExt —— EFMI/EFF -> BEN BEM 迁移工具（C++17，无 .NET / Python）
+// Converter4BENeXt —— EFMI/EFF -> BEN BEM 迁移工具（C++17，无 .NET / Python）
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -537,8 +537,8 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     cJSON* mroot = obj(nullptr);
     cJSON_AddNumberToObject(mroot,"schema",1);
     cJSON_AddStringToObject(mroot,"package_id",("c4ben."+cat.character).c_str());
-    cJSON_AddStringToObject(mroot,"name",("Converter4BENExt EFF: "+fs::path(dir).filename().string()).c_str());
-    cJSON_AddStringToObject(mroot,"author","Converter4BENExt");
+    cJSON_AddStringToObject(mroot,"name",("Converter4BENeXt EFF: "+fs::path(dir).filename().string()).c_str());
+    cJSON_AddStringToObject(mroot,"author","Converter4BENeXt");
     cJSON_AddStringToObject(mroot,"version","0.1.0");
     cJSON* caps = jarr(); for (auto s : {"native-materials","palette-u8","indices-u32","fixed-appearances"}) jadd(caps,jstrv(s));
     cJSON_AddItemToObject(mroot,"required_capabilities",caps);
@@ -564,19 +564,466 @@ static int effiComponentMid(const string& s) {
     return -1;
 }
 
+
+// ============================ 旧 EFMI 兼容层 ============================
+// 不依赖旧 catalog：把旧包拆成“组件指纹”，和当前角色 catalog 打分，输出可审计的 mapping 草稿。
+struct LegacyComp {
+    int id = -1;
+    string hash;
+    int match_index_count = 0;
+    int index_count = 0, vertex_count = 0;
+    int vb0_stride = 0, vb1_stride = 0, vb2_stride = 0;
+    int bone_max = -1, bone_used = 0;
+    bool bones_known = false; // 只有 stride12/旧 alpha 的 u8 本地索引能直接数出骨骼数
+    vector<pair<int,double>> candidates; // target cid, score
+};
+
+static Cat loadCatalogByCharacter(const string& dir, const string& character) {
+    Cat best;
+    for (auto& p : fs::directory_iterator(dir)) {
+        if (p.path().extension() != ".json") continue;
+        auto txt = readFile(p.path().string());
+        cJSON* root = cJSON_ParseWithLength((const char*)txt.data(), txt.size());
+        if (!root) continue;
+        auto kind = get(root, "kind");
+        if (!cJSON_IsString(kind) || string(kind->valuestring) != "bem-character-catalog") { cJSON_Delete(root); continue; }
+        if (jstr(root, "character_id") == character) { best.root = root; break; }
+        cJSON_Delete(root);
+    }
+    if (!best.root) throw runtime_error("catalog character not found: " + character);
+    best.character = character; best.comps = get(best.root, "components");
+    best.entries = get(best.root, "entries"); best.textures = get(best.root, "textures");
+    best.ids.clear();
+    for (auto* c = best.comps->child; c; c = c->next) best.ids.push_back(stoi(string(c->string)));
+    sort(best.ids.begin(), best.ids.end());
+    best.base.resize(best.ids.size()); int acc = 0;
+    for (size_t i = 0; i < best.ids.size(); i++) {
+        best.base[i] = acc;
+        acc += cJSON_GetArraySize(get(cJSON_GetObjectItemCaseSensitive(best.comps, to_string(best.ids[i]).c_str()), "bone_names"));
+    }
+    best.totalBones = acc;
+    return best;
+}
+
+static int legacyIndexCount(const string& dir, Ini& ini, int mid, int& vcount, int& b0, int& b1, int& b2, int& maxBone, int& usedBone) {
+    auto rd = [&](const string& sec, int& stride, vector<uint8_t>& data) -> bool {
+        auto it = ini.sec.find(sec); if (it == ini.sec.end()) return false;
+        auto st = it->second.find("stride"); if (st == it->second.end()) return false;
+        stride = atoi(st->second.c_str());
+        auto fn = it->second.find("filename"); if (fn == it->second.end()) return false;
+        data = readFile(dir + "/" + fn->second); return true;
+    };
+    int s0=0,s1=0,s2=0,sib=0; vector<uint8_t> vb0,vb1,vb2,ib;
+    if (!rd("Resource_Component"+to_string(mid)+"_VB0", s0, vb0) ||
+        !rd("Resource_Component"+to_string(mid)+"_IB", sib, ib)) return -1;
+    rd("Resource_Component"+to_string(mid)+"_VB1", s1, vb1);
+    if (!rd("Resource_Component"+to_string(mid)+"_VB2", s2, vb2)) return -1;
+    if (s0 <= 0) return -1;
+    vcount = (int)vb0.size() / s0;
+    b0 = s0; b1 = s1; b2 = s2;
+    int ni = (int)ib.size() / 2;
+    // 旧 alpha: u8 本地骨骼；stride16 是合并骨架 u16，stride8 是刚性 u16。
+    set<int> used;
+    if (s2 == 12) {
+        for (int v = 0; v < vcount; v++) for (int k = 0; k < 4; k++) {
+            uint8_t x = vb2[v*12 + 8 + k];
+            uint16_t w = (uint16_t)(vb2[v*12 + k*2] | (vb2[v*12 + k*2 + 1] << 8));
+            if (w || x) { used.insert(x); if ((int)x > maxBone) maxBone = x; }
+        }
+    } else if (s2 == 16) {
+        for (int v = 0; v < vcount; v++) for (int k = 0; k < 4; k++) {
+            uint16_t w = (uint16_t)(vb2[v*16 + k*2] | (vb2[v*16 + k*2 + 1] << 8));
+            uint16_t x = (uint16_t)(vb2[v*16 + 8 + k*2] | (vb2[v*16 + 8 + k*2 + 1] << 8));
+            if (w) { used.insert(x); if ((int)x > maxBone) maxBone = x; }
+        }
+    } else if (s2 == 8) {
+        for (int v = 0; v < vcount; v++) {
+            uint16_t x = (uint16_t)(vb2[v*8] | (vb2[v*8 + 1] << 8));
+            used.insert(x); if ((int)x > maxBone) maxBone = x;
+        }
+    }
+    usedBone = (int)used.size();
+    return ni;
+}
+
+static int legacyInspect(const string& dir, const string& catDir, const string& character, const string& outPath) {
+    auto ini = Ini::parse(dir + "/mod.ini");
+    if (!character.empty()) {
+        // 只接受旧布局；新格式会先走精确 hash 路径。
+    } else {
+        throw runtime_error("legacy mapping needs --character <chr_...> (旧包没有当前 hash，必须显式指定目标角色)");
+    }
+    auto cat = loadCatalogByCharacter(catDir, character);
+    vector<LegacyComp> comps;
+    for (auto& s : ini.order) {
+        int mid = effiComponentMid(s); if (mid < 0) continue;
+        auto it = ini.sec[s].find("hash"); if (it == ini.sec[s].end()) continue;
+        LegacyComp c; c.id = mid; c.hash = lower(it->second);
+        auto mic = ini.sec[s].find("match_index_count");
+        if (mic != ini.sec[s].end()) c.match_index_count = atoi(mic->second.c_str());
+        c.index_count = legacyIndexCount(dir, ini, mid, c.vertex_count, c.vb0_stride, c.vb1_stride, c.vb2_stride, c.bone_max, c.bone_used);
+        c.bones_known = (c.vb2_stride == 12 || c.vb2_stride == 8);
+        if (c.index_count < 0) { cerr << "skip component " << mid << ": missing VB/IB\n"; continue; }
+        comps.push_back(c);
+    }
+    if (comps.empty()) throw runtime_error("no legacy ComponentN resources found");
+
+    // 为每个旧组件和当前 catalog 组件打分：index count 为主，骨骼数为辅。
+    for (auto& c : comps) {
+        int oldCount = c.match_index_count > 0 ? c.match_index_count : c.index_count;
+        int oldBones = c.bone_max + 1;
+        for (int cid : cat.ids) {
+            auto* t = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
+            int tc = jint(t, "original_index_count");
+            int tb = cJSON_GetArraySize(get(t, "bone_names"));
+            if (tc <= 0) continue;
+            double countScore = 1.0 - std::min(1.0, std::fabs((double)oldCount - tc) / std::max(oldCount, tc));
+            double boneScore = 1.0 - std::min(1.0, std::fabs((double)oldBones - tb) / std::max(oldBones, tb));
+            // 旧 EFMI 的组件顺序也有一点先验，但不作为主证据。
+            double orderBonus = (c.id == cid) ? 0.03 : 0.0;
+            double score = std::max(0.0, std::min(1.0, 0.68 * countScore + 0.29 * boneScore + orderBonus));
+            c.candidates.push_back({cid, score});
+        }
+        sort(c.candidates.begin(), c.candidates.end(), [](auto& a, auto& b) { return a.second > b.second; });
+    }
+
+    cJSON* root = obj(nullptr);
+    cJSON_AddStringToObject(root, "status", "draft");
+    cJSON_AddStringToObject(root, "source_format", "efmi-legacy");
+    cJSON_AddStringToObject(root, "note", "draft mapping; bones/textures require review; no silent guessing");
+    cJSON_AddStringToObject(root, "source_dir", fs::path(dir).filename().string().c_str());
+    cJSON* target = obj(nullptr);
+    cJSON_AddStringToObject(target, "character_id", character.c_str());
+    cJSON_AddStringToObject(target, "revision", jstr(cat.root, "revision").c_str());
+    cJSON_AddItemToObject(root, "target", target);
+    cJSON* jcomps = jarr();
+    cJSON* jbones = jarr();
+    cout << "legacy components: " << comps.size() << " -> " << character << " (" << cat.ids.size() << " target comps)\n";
+    for (auto& c : comps) {
+        cJSON* x = obj(nullptr);
+        cJSON_AddNumberToObject(x, "source_id", c.id);
+        cJSON_AddStringToObject(x, "source_hash", c.hash.c_str());
+        cJSON_AddNumberToObject(x, "match_index_count", c.match_index_count);
+        cJSON_AddNumberToObject(x, "index_count", c.index_count);
+        cJSON_AddNumberToObject(x, "vertex_count", c.vertex_count);
+        cJSON_AddNumberToObject(x, "vb0_stride", c.vb0_stride);
+        cJSON_AddNumberToObject(x, "vb2_stride", c.vb2_stride);
+        cJSON_AddNumberToObject(x, "bone_max", c.bone_max);
+        cJSON_AddNumberToObject(x, "bone_used", c.bone_used);
+        cJSON* alts = jarr();
+        for (int i = 0; i < (int)std::min<size_t>(3, c.candidates.size()); i++) {
+            cJSON* a = obj(nullptr);
+            cJSON_AddNumberToObject(a, "target", c.candidates[i].first);
+            cJSON_AddNumberToObject(a, "score", c.candidates[i].second);
+            auto* t = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(c.candidates[i].first).c_str());
+            cJSON_AddStringToObject(a, "mesh_name", jstr(t, "mesh_name").c_str());
+            cJSON_AddNumberToObject(a, "original_index_count", jint(t, "original_index_count"));
+            cJSON_AddNumberToObject(a, "target_bones", cJSON_GetArraySize(get(t, "bone_names")));
+            jadd(alts, a);
+        }
+        cJSON_AddItemToObject(x, "alternatives", alts);
+        if (!c.candidates.empty()) {
+            cJSON_AddNumberToObject(x, "target", c.candidates[0].first);
+            cJSON_AddNumberToObject(x, "confidence", c.candidates[0].second);
+            cJSON_AddBoolToObject(x, "needs_review", c.candidates[0].second < 0.78);
+        }
+        jadd(jcomps, x);
+        if (!c.candidates.empty() && c.bones_known && c.bone_max >= 0) {
+            int tcid = c.candidates[0].first;
+            auto* t = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(tcid).c_str());
+            int tb = cJSON_GetArraySize(get(t, "bone_names"));
+            if (c.bone_max + 1 == tb) {
+                for (int bi = 0; bi <= c.bone_max; bi++) {
+                    cJSON* b = obj(nullptr);
+                    cJSON_AddNumberToObject(b, "source_id", c.id);
+                    cJSON_AddNumberToObject(b, "source_index", bi);
+                    cJSON_AddNumberToObject(b, "target_component", tcid);
+                    cJSON_AddNumberToObject(b, "target_index", bi);
+                    cJSON_AddStringToObject(b, "mode", "exact-count-index-order");
+                    jadd(jbones, b);
+                }
+            }
+        }
+        cout << "  comp " << c.id << " hash=" << c.hash << " idx=" << c.index_count
+             << " bones<=" << (c.bone_max + 1) << " ->";
+        for (int i = 0; i < (int)std::min<size_t>(3, c.candidates.size()); i++)
+            cout << " " << c.candidates[i].first << "(" << c.candidates[i].second << ")";
+        cout << "\n";
+    }
+    cJSON_AddItemToObject(root, "components", jcomps);
+    cJSON* notes = jarr();
+    jadd(notes, jstrv("旧 EFMI 没有骨骼名；只有 stride12(u8 本地索引) 才能直接数出骨骼数"));
+    jadd(notes, jstrv("组件匹配置信度 < 0.78 必须人工复核，不自动写入 BEM"));
+    jadd(notes, jstrv("贴图映射需要 DDS 内容指纹或人工 profile，本命令只输出空表"));
+    cJSON_AddItemToObject(root, "notes", notes);
+    cJSON* jtex = jarr(); cJSON_AddItemToObject(root, "textures", jtex);
+    cJSON_AddItemToObject(root, "bones", jbones);
+
+    char* text = cJSON_Print(root);
+    if (!text) throw runtime_error("mapping serialize failed");
+    if (!outPath.empty()) writeFile(outPath, vector<uint8_t>((uint8_t*)text, (uint8_t*)text + strlen(text)));
+    else cout << text << "\n";
+    free(text); cJSON_Delete(root); cJSON_Delete(cat.root);
+    return 0;
+}
+
+
+// ============================ 旧 EFMI profile 转换 ============================
+// 严格按 mapping.json 转换：组件/骨骼/贴图没有显式映射就拒绝，不按 hash 或编号猜。
+static int convertLegacyProfile(const string& dir, const string& catDir, const string& profilePath,
+                                const string& out, bool allowReview) {
+    auto ini = Ini::parse(dir + "/mod.ini");
+    auto pb = readFile(profilePath);
+    cJSON* pr = cJSON_ParseWithLength((const char*)pb.data(), pb.size());
+    if (!pr) throw runtime_error("profile JSON parse failed");
+    auto* tgt = get(pr, "target");
+    string character = jstr(tgt, "character_id");
+    if (character.empty()) throw runtime_error("profile.target.character_id missing");
+    auto cat = loadCatalogByCharacter(catDir, character);
+
+    map<int,int> compMap;
+    map<int,bool> review;
+    auto* pcs = get(pr, "components");
+    if (!cJSON_IsArray(pcs)) throw runtime_error("profile.components missing");
+    for (auto* c = pcs->child; c; c = c->next) {
+        int sid = jint(c, "source_id"), tid = jint(c, "target");
+        if (tid <= 0 && !get(c, "target")) continue;
+        bool needs = cJSON_IsTrue(get(c, "needs_review"));
+        if (needs && !allowReview) { cerr << "skip source " << sid << ": needs_review (use --allow-review to force)\n"; continue; }
+        bool exists = false; for (int cid : cat.ids) if (cid == tid) exists = true;
+        if (!exists) { cerr << "skip source " << sid << ": target " << tid << " not in catalog\n"; continue; }
+        if (compMap.count(sid)) continue;
+        compMap[sid] = tid; review[sid] = needs;
+    }
+    if (compMap.empty()) throw runtime_error("no usable component mapping (need --allow-review?)");
+
+    map<pair<int,int>, pair<int,int>> boneMap;
+    auto* pbs = get(pr, "bones");
+    if (cJSON_IsArray(pbs)) for (auto* b = pbs->child; b; b = b->next) {
+        int sid = jint(b, "source_id"), si = jint(b, "source_index");
+        int tc = jint(b, "target_component"), ti = jint(b, "target_index");
+        boneMap[{sid, si}] = {tc, ti};
+    }
+
+    // 旧贴图 hash -> DDS；profile.textures 决定 hash -> catalog original_name
+    map<string, string> texDds;
+    for (auto& sec : ini.order) {
+        if (sec.rfind("Resource_Texture", 0) != 0) continue;
+        int n = atoi(sec.c_str() + strlen("Resource_Texture"));
+        auto fn = effKey(ini, sec, "filename"); if (fn.empty()) continue;
+        auto hash = effKey(ini, "TextureOverride_Texture" + to_string(n), "hash");
+        if (!hash.empty()) texDds[lower(hash)] = fn;
+    }
+    struct ProfileTex { string name, dds; };
+    vector<ProfileTex> profileTex;
+    auto* pts = get(pr, "textures");
+    if (cJSON_IsArray(pts)) for (auto* t = pts->child; t; t = t->next) {
+        string h = lower(jstr(t, "source_hash")), name = jstr(t, "target_name");
+        if (h.empty() || name.empty() || !texDds.count(h)) continue;
+        bool ok = false; if (cJSON_IsObject(cat.textures)) for (auto* ct = cat.textures->child; ct; ct = ct->next) {
+            auto* nm = get(ct, "name"); if (cJSON_IsString(nm) && name == nm->valuestring) { ok = true; break; }
+        }
+        if (ok) profileTex.push_back({name, texDds[h]});
+    }
+
+    vector<vector<uint8_t>> payloads;
+    auto addPayload = [&](vector<uint8_t> b) { payloads.push_back(std::move(b)); return (int)payloads.size() - 1; };
+    cJSON* jtextures = jarr();
+    map<string,int> texIndex;
+    vector<int> textureIds;
+    for (auto& t : profileTex) {
+        try {
+            Dds d = readDds(dir + "/" + t.dds);
+            int pid = addPayload(d.data);
+            cJSON* x = obj(nullptr);
+            cJSON_AddNumberToObject(x, "width", d.w); cJSON_AddNumberToObject(x, "height", d.h);
+            cJSON_AddNumberToObject(x, "mips", d.mips); cJSON_AddNumberToObject(x, "format", d.fmt);
+            cJSON_AddBoolToObject(x, "srgb", d.srgb); cJSON_AddStringToObject(x, "original_name", t.name.c_str());
+            cJSON_AddNumberToObject(x, "payload", pid); jadd(jtextures, x);
+            int ti = cJSON_GetArraySize(jtextures) - 1; texIndex[t.name] = ti; textureIds.push_back(ti);
+        } catch (exception& e) { cerr << "texture skip " << t.dds << ": " << e.what() << "\n"; }
+    }
+
+    cJSON* jmeshes = jarr();
+    map<int,int> meshIndex;
+    for (auto& [mid, cid] : compMap) {
+        auto nvb0 = "Resource_Component" + to_string(mid) + "_VB0";
+        auto nvb1 = "Resource_Component" + to_string(mid) + "_VB1";
+        auto nvb2 = "Resource_Component" + to_string(mid) + "_VB2";
+        auto nib  = "Resource_Component" + to_string(mid) + "_IB";
+        if (!ini.sec.count(nvb0) || !ini.sec.count(nvb1) || !ini.sec.count(nvb2) || !ini.sec.count(nib)) { cout << "skip comp " << mid << ": missing resources\n"; continue; }
+        auto rd = [&](const string& sec, int& stride, vector<uint8_t>& data) {
+            auto& d = ini.sec[sec]; stride = atoi(d["stride"].c_str()); data = readFile(dir + "/" + d["filename"]);
+        };
+        int s0,s1,s2,sib; vector<uint8_t> vb0,vb1,vb2,ib;
+        rd(nvb0,s0,vb0); rd(nvb1,s1,vb1); rd(nvb2,s2,vb2); rd(nib,sib,ib);
+        if (s0 <= 0 || s1 <= 0) { cout << "skip comp " << mid << ": bad stride\n"; continue; }
+        int nv = (int)vb0.size()/s0;
+        if ((int)vb1.size()/s1 != nv || s2 != 12) { cout << "skip comp " << mid << ": legacy skin requires stride12 (got " << s2 << ")\n"; continue; }
+        if ((int)vb2.size() != nv*12) { cout << "skip comp " << mid << ": VB2 size mismatch\n"; continue; }
+        int ni = (int)ib.size()/2;
+
+        auto* comp = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
+        auto* attrs = get(comp, "attributes");
+        int fsz[] = {4,2,1,1,2,2,1,1,2,2,4,4}; int offs[3] = {0,0,0};
+        int astrides[3] = {0,0,0};
+        cJSON* jattrs = jarr();
+        for (auto* a = attrs->child; a; a = a->next) {
+            int sem = a->child->valueint, fmt = a->child->next->valueint, dim = a->child->next->next->valueint, stream = a->child->next->next->next->valueint;
+            if (stream >= 2) continue;
+            cJSON* x = jarr(); jadd(x,jnum(sem)); jadd(x,jnum(fmt)); jadd(x,jnum(dim)); jadd(x,jnum(stream)); jadd(x,jnum(offs[stream]));
+            jadd(jattrs,x); offs[stream] += fsz[fmt]*dim; astrides[stream] = offs[stream];
+        }
+        cJSON* sx = jarr(); jadd(sx,jnum(12)); jadd(sx,jnum(4)); jadd(sx,jnum(4)); jadd(sx,jnum(2)); jadd(sx,jnum(0)); jadd(jattrs,sx);
+        sx = jarr(); jadd(sx,jnum(13)); jadd(sx,jnum(6)); jadd(sx,jnum(4)); jadd(sx,jnum(2)); jadd(sx,jnum(8)); jadd(jattrs,sx);
+        if (astrides[0] != s0 || astrides[1] != s1) { cout << "skip comp " << mid << ": target attrs " << astrides[0] << "/" << astrides[1] << " != source " << s0 << "/" << s1 << "\n"; continue; }
+
+        int targetBones = cJSON_GetArraySize(get(comp, "bone_names"));
+        // 源组件本地骨骼数：从 VB2 里数最大值
+        int srcBones = 0; for (int v = 0; v < nv; v++) for (int k = 0; k < 4; k++) {
+            uint16_t w = (uint16_t)(vb2[v*12+k*2] | (vb2[v*12+k*2+1] << 8));
+            if (w) srcBones = std::max(srcBones, (int)vb2[v*12+8+k] + 1);
+        }
+        vector<uint8_t> skin(nv*12);
+        vector<cJSON*> bones; map<pair<int,int>,int> pal; bool ok = true;
+        for (int v = 0; v < nv && ok; v++) {
+            uint8_t outIdx[4] = {0,0,0,0};
+            for (int k = 0; k < 4; k++) {
+                uint16_t w = (uint16_t)(vb2[v*12+k*2] | (vb2[v*12+k*2+1] << 8));
+                uint8_t si = vb2[v*12+8+k];
+                if (!w) continue;
+                pair<int,int> tgt;
+                auto it = boneMap.find({mid, (int)si});
+                if (it != boneMap.end()) tgt = it->second;
+                else if (srcBones == targetBones) tgt = {cid, (int)si};
+                else { cout << "skip comp " << mid << ": bone " << (int)si << " unmapped and counts differ (" << srcBones << " vs " << targetBones << ")\n"; ok = false; break; }
+                auto key = tgt;
+                auto pit = pal.find(key);
+                int pi;
+                if (pit == pal.end()) {
+                    pi = (int)pal.size(); if (pi > 255) { ok = false; break; }
+                    pal[key] = pi;
+                    auto* tc = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(tgt.first).c_str());
+                    auto* bn = get(tc, "bone_names"); auto* nm = cJSON_GetArrayItem(bn, tgt.second);
+                    if (!cJSON_IsString(nm)) { ok = false; break; }
+                    cJSON* b = obj(nullptr); cJSON_AddNumberToObject(b,"component",tgt.first); cJSON_AddNumberToObject(b,"index",tgt.second); cJSON_AddStringToObject(b,"name",nm->valuestring);
+                    bones.push_back(b);
+                } else pi = pit->second;
+                outIdx[k] = (uint8_t)pi;
+            }
+            if (!ok) break;
+            for (int k = 0; k < 4; k++) { uint16_t w = (uint16_t)(vb2[v*12+k*2] | (vb2[v*12+k*2+1] << 8)); skin[v*12+k*2]=w&255; skin[v*12+k*2+1]=w>>8; }
+            memcpy(&skin[v*12+8], outIdx, 4);
+        }
+        if (!ok) continue;
+
+        int p0=addPayload(vb0), p1=addPayload(vb1), p2=addPayload(skin), pib=addPayload(ib);
+        cJSON* jstreams = jarr();
+        auto stream = [&](int stride,int payload){ cJSON* q=obj(nullptr); cJSON_AddNumberToObject(q,"stride",stride); cJSON_AddNumberToObject(q,"payload",payload); jadd(jstreams,q); };
+        stream(s0,p0); stream(s1,p1); stream(12,p2);
+        cJSON* jmesh = obj(nullptr);
+        cJSON_AddNumberToObject(jmesh,"vertex_count",nv);
+        cJSON_AddNumberToObject(jmesh,"index_size",2);
+        cJSON_AddItemToObject(jmesh,"streams",jstreams);
+        cJSON_AddItemToObject(jmesh,"attributes",jattrs);
+        cJSON* jbones = jarr(); for (auto* b : bones) jadd(jbones,b); cJSON_AddItemToObject(jmesh,"bones",jbones);
+        cJSON_AddNumberToObject(jmesh,"indices",pib);
+        cJSON_AddNumberToObject(jmesh,"index_count",ni);
+        cJSON* jdraws = jarr(); cJSON* jd = obj(nullptr);
+        cJSON_AddNumberToObject(jd,"start",0); cJSON_AddNumberToObject(jd,"count",ni);
+        cJSON_AddNumberToObject(jd,"material_component",cid); cJSON_AddNumberToObject(jd,"material_slot",0);
+        auto* mats = get(comp,"materials"); auto* m0 = cJSON_GetArrayItem(mats,0);
+        cJSON_AddStringToObject(jd,"material_name",m0?m0->valuestring:"M_unknown");
+        cJSON* jtex = jarr(); for (int ti : textureIds) jadd(jtex,jnum(ti)); cJSON_AddItemToObject(jd,"textures",jtex);
+        jadd(jdraws,jd); cJSON_AddItemToObject(jmesh,"draws",jdraws);
+        meshIndex[cid] = cJSON_GetArraySize(jmeshes); jadd(jmeshes,jmesh);
+        cout << "legacy comp " << mid << " -> " << cid << ": v=" << nv << " idx=" << ni << " bones=" << pal.size() << "\n";
+    }
+    if (meshIndex.empty()) throw runtime_error("no component converted from profile");
+
+    // target + appearance
+    cJSON* jtarget = obj(nullptr);
+    cJSON_AddStringToObject(jtarget,"character_id",character.c_str());
+    cJSON_AddStringToObject(jtarget,"platform","windows-x64");
+    cJSON_AddStringToObject(jtarget,"profile_id",jstr(cat.root,"profile_id").c_str());
+    cJSON_AddStringToObject(jtarget,"revision",jstr(cat.root,"revision").c_str());
+    cJSON_AddStringToObject(jtarget,"snapshot","");
+    cJSON_AddStringToObject(jtarget,"world_resource",jstr(cat.root,"world_resource").c_str());
+    cJSON_AddStringToObject(jtarget,"ui_resource",jstr(cat.root,"ui_resource").c_str());
+    cJSON* jcomps = jarr();
+    for (int cid : cat.ids) {
+        auto* c = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
+        cJSON* x = obj(nullptr); cJSON_AddNumberToObject(x,"id",cid);
+        cJSON_AddStringToObject(x,"mesh_name",jstr(c,"mesh_name").c_str());
+        cJSON_AddNumberToObject(x,"original_index_count",jint(c,"original_index_count"));
+        cJSON* bn = jarr(); for (auto* b = get(c,"bone_names")->child; b; b = b->next) jadd(bn,jstrv(b->valuestring)); cJSON_AddItemToObject(x,"bone_names",bn);
+        cJSON* mm = jarr(); for (auto* m = get(c,"materials")->child; m; m = m->next) jadd(mm,jstrv(m->valuestring)); cJSON_AddItemToObject(x,"materials",mm);
+        jadd(jcomps,x);
+    }
+    cJSON_AddItemToObject(jtarget,"components",jcomps);
+    cJSON* japps = jarr(); cJSON* japp = obj(nullptr);
+    cJSON_AddStringToObject(japp,"id","default"); cJSON_AddStringToObject(japp,"name","默认外观");
+    cJSON* jac = jarr();
+    for (int cid : cat.ids) {
+        cJSON* x = obj(nullptr); cJSON_AddNumberToObject(x,"target",cid);
+        auto it = meshIndex.find(cid);
+        if (it == meshIndex.end()) cJSON_AddStringToObject(x,"operation","keep");
+        else { cJSON_AddStringToObject(x,"operation","replace"); cJSON_AddNumberToObject(x,"mesh",it->second); }
+        jadd(jac,x);
+    }
+    cJSON_AddItemToObject(japp,"components",jac); jadd(japps,japp);
+
+    cJSON* root = obj(nullptr);
+    cJSON_AddNumberToObject(root,"schema",1);
+    cJSON_AddStringToObject(root,"package_id",("c4ben."+character+".legacy").c_str());
+    cJSON_AddStringToObject(root,"name",("Converter4BENeXt legacy: "+fs::path(dir).filename().string()).c_str());
+    cJSON_AddStringToObject(root,"author","Converter4BENeXt");
+    cJSON_AddStringToObject(root,"version","0.2.0");
+    cJSON* caps = jarr(); for (auto s : {"native-materials","palette-u8","indices-u32","fixed-appearances"}) jadd(caps,jstrv(s));
+    cJSON_AddItemToObject(root,"required_capabilities",caps);
+    cJSON_AddItemToObject(root,"target",jtarget);
+    cJSON_AddItemToObject(root,"meshes",jmeshes);
+    cJSON_AddItemToObject(root,"textures",jtextures);
+    cJSON_AddStringToObject(root,"default_appearance_id","default");
+    cJSON_AddItemToObject(root,"appearances",japps);
+    char* json = cJSON_PrintUnformatted(root); if (!json) throw runtime_error("manifest serialize failed");
+    vector<uint8_t> manifest((uint8_t*)json, (uint8_t*)json + strlen(json)); free(json);
+    writeBem(out, manifest, payloads);
+    cout << "written " << out << ": meshes=" << cJSON_GetArraySize(jmeshes) << " textures=" << cJSON_GetArraySize(jtextures) << " payloads=" << payloads.size() << "\n";
+    cJSON_Delete(root); cJSON_Delete(pr); cJSON_Delete(cat.root);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     try {
-        if (argc < 2 || string(argv[1]) != "convert") {
-            cerr << "usage: c4ben convert <mod-dir> --catalog <catalog-dir> --out <out.zip>\n"; return 2;
+        if (argc < 2 || (string(argv[1]) != "convert" && string(argv[1]) != "inspect-legacy" && string(argv[1]) != "map")) {
+            cerr << "usage: c4ben convert <mod-dir> --catalog <catalog-dir> --out <out.bem>\n"
+                    "       c4ben inspect-legacy|map <old-mod-dir> --catalog <dir> --character <chr_...> [--out mapping.json]\n"; return 2;
         }
-        string dir, catDir, out;
+        if (string(argv[1]) == "inspect-legacy" || string(argv[1]) == "map") {
+            string dir, catDir, character, outPath;
+            for (int i = 2; i < argc; i++) {
+                string a = argv[i];
+                if (a == "--catalog" && i + 1 < argc) catDir = argv[++i];
+                else if (a == "--character" && i + 1 < argc) character = argv[++i];
+                else if (a == "--out" && i + 1 < argc) outPath = argv[++i];
+                else dir = a;
+            }
+            if (dir.empty() || catDir.empty()) { cerr << "missing mod/catalog\n"; return 2; }
+            return legacyInspect(dir, catDir, character, outPath);
+        }
+        string dir, catDir, out, profile;
+        bool allowReview = false;
         for (int i = 2; i < argc; i++) {
             string a = argv[i];
             if (a == "--catalog" && i + 1 < argc) catDir = argv[++i];
             else if (a == "--out" && i + 1 < argc) out = argv[++i];
+            else if (a == "--profile" && i + 1 < argc) profile = argv[++i];
+            else if (a == "--allow-review") allowReview = true;
             else dir = a;
         }
         if (dir.empty() || catDir.empty() || out.empty()) { cerr << "missing args\n"; return 2; }
+        if (!profile.empty()) return convertLegacyProfile(dir, catDir, profile, out, allowReview);
         auto ini = Ini::parse(dir + "/mod.ini");
         if (effKey(ini, "Mod", "format") == "3") return convertEff(dir, catDir, out);
         vector<string> hashes;
@@ -801,8 +1248,8 @@ int main(int argc, char** argv) {
         cJSON* mroot = obj(nullptr);
         cJSON_AddNumberToObject(mroot, "schema", 1);
         cJSON_AddStringToObject(mroot, "package_id", ("c4ben." + string(cat.character)).c_str());
-        cJSON_AddStringToObject(mroot, "name", ("Converter4BENExt: " + fs::path(dir).filename().string()).c_str());
-        cJSON_AddStringToObject(mroot, "author", "Converter4BENExt");
+        cJSON_AddStringToObject(mroot, "name", ("Converter4BENeXt: " + fs::path(dir).filename().string()).c_str());
+        cJSON_AddStringToObject(mroot, "author", "Converter4BENeXt");
         cJSON_AddStringToObject(mroot, "version", "0.1.0");
         cJSON* caps = jarr(); for (auto s : {"native-materials", "palette-u8", "indices-u32", "fixed-appearances"}) jadd(caps, jstrv(s));
         cJSON_AddItemToObject(mroot, "required_capabilities", caps);
