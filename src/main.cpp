@@ -15,6 +15,7 @@
 #include <vector>
 #include <zlib.h>
 #include "third_party/cJSON.h"
+#include "c4ben.h"
 
 using namespace std;
 namespace fs = std::filesystem;
@@ -401,7 +402,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
         if (parts.empty()) { cout << "skip replace " << rkey << ": no parts\n"; continue; }
 
         vector<uint8_t> s0, s1, s2; vector<uint32_t> indices;
-        vector<cJSON*> bones; map<pair<int,int>,int> pal; bool ok = true; bool anyColor = false; int totalIdx = 0;
+        vector<cJSON*> bones; map<pair<int,int>,int> pal; bool ok = true; int totalIdx = 0;
         cJSON* jdraws = jarr();
         for (auto& pname : parts) {
             auto meshSec = partMesh.count(pname) ? partMesh[pname] : "";
@@ -442,7 +443,6 @@ static int convertEff(const string& dir, const string& catDir, const string& out
                 } else local[bi] = it->second;
             }
             if (!ok) break;
-            if (!m.col.empty()) anyColor = true;
             size_t baseVert = s0.size() / 40;
             for (int v = 0; v < m.vcount; v++) {
                 auto pushf = [&](vector<uint8_t>& dst, float x) { uint8_t b[4]; memcpy(b, &x, 4); dst.insert(dst.end(), b, b + 4); };
@@ -481,9 +481,11 @@ static int convertEff(const string& dir, const string& catDir, const string& out
         cJSON* jattrs = jarr();
         auto attr = [&](int sem, int fmt, int dim, int stream, int off) { cJSON* a = jarr(); jadd(a,jnum(sem)); jadd(a,jnum(fmt)); jadd(a,jnum(dim)); jadd(a,jnum(stream)); jadd(a,jnum(off)); jadd(jattrs,a); };
         attr(0,0,3,0,0); attr(1,0,3,0,12); attr(2,0,4,0,24);
-        int s1stride = anyColor ? 24 : 8;
+        // EFF 路径的 s1 固定是 UV(8B) + color(16B) = 24B/顶点；必须与
+        // 实际 payload 长度一致，否则 BEM 规范的长度自洽校验会拒绝。
+        const int s1stride = 24;
         attr(4,0,2,1,0);
-        if (anyColor) attr(3,0,4,1,8);
+        attr(3,0,4,1,8);
         attr(12,4,4,2,0); attr(13,6,4,2,8);
         cJSON* jstreams = jarr();
         auto stream = [&](int stride, int payload) { cJSON* x = obj(nullptr); cJSON_AddNumberToObject(x,"stride",stride); cJSON_AddNumberToObject(x,"payload",payload); jadd(jstreams,x); };
@@ -994,36 +996,9 @@ static int convertLegacyProfile(const string& dir, const string& catDir, const s
     return 0;
 }
 
-int main(int argc, char** argv) {
-    try {
-        if (argc < 2 || (string(argv[1]) != "convert" && string(argv[1]) != "inspect-legacy" && string(argv[1]) != "map")) {
-            cerr << "usage: c4ben convert <mod-dir> --catalog <catalog-dir> --out <out.bem>\n"
-                    "       c4ben inspect-legacy|map <old-mod-dir> --catalog <dir> --character <chr_...> [--out mapping.json]\n"; return 2;
-        }
-        if (string(argv[1]) == "inspect-legacy" || string(argv[1]) == "map") {
-            string dir, catDir, character, outPath;
-            for (int i = 2; i < argc; i++) {
-                string a = argv[i];
-                if (a == "--catalog" && i + 1 < argc) catDir = argv[++i];
-                else if (a == "--character" && i + 1 < argc) character = argv[++i];
-                else if (a == "--out" && i + 1 < argc) outPath = argv[++i];
-                else dir = a;
-            }
-            if (dir.empty() || catDir.empty()) { cerr << "missing mod/catalog\n"; return 2; }
-            return legacyInspect(dir, catDir, character, outPath);
-        }
-        string dir, catDir, out, profile;
-        bool allowReview = false;
-        for (int i = 2; i < argc; i++) {
-            string a = argv[i];
-            if (a == "--catalog" && i + 1 < argc) catDir = argv[++i];
-            else if (a == "--out" && i + 1 < argc) out = argv[++i];
-            else if (a == "--profile" && i + 1 < argc) profile = argv[++i];
-            else if (a == "--allow-review") allowReview = true;
-            else dir = a;
-        }
-        if (dir.empty() || catDir.empty() || out.empty()) { cerr << "missing args\n"; return 2; }
-        if (!profile.empty()) return convertLegacyProfile(dir, catDir, profile, out, allowReview);
+
+// EFMI 转换主流程（从 CLI 中抽出，供 C ABI 复用）。
+static int convertEfmi(const string& dir, const string& catDir, const string& out) {
         auto ini = Ini::parse(dir + "/mod.ini");
         if (effKey(ini, "Mod", "format") == "3") return convertEff(dir, catDir, out);
         vector<string> hashes;
@@ -1274,5 +1249,112 @@ int main(int argc, char** argv) {
         cout << "written " << out << ": meshes=" << cJSON_GetArraySize(jmeshes) << " textures=" << cJSON_GetArraySize(jtextures) << " payloads=" << payloads.size() << "\n";
         cJSON_Delete(mroot); cJSON_Delete(cat.root);
         return 0;
+}
+
+#ifndef C4BEN_NO_MAIN
+int main(int argc, char** argv) {
+    try {
+        if (argc < 2 || (string(argv[1]) != "convert" && string(argv[1]) != "inspect-legacy" && string(argv[1]) != "map")) {
+            cerr << "usage: c4ben convert <mod-dir> --catalog <catalog-dir> --out <out.bem>\n"
+                    "       c4ben inspect-legacy|map <old-mod-dir> --catalog <dir> --character <chr_...> [--out mapping.json]\n"; return 2;
+        }
+        if (string(argv[1]) == "inspect-legacy" || string(argv[1]) == "map") {
+            string dir, catDir, character, outPath;
+            for (int i = 2; i < argc; i++) {
+                string a = argv[i];
+                if (a == "--catalog" && i + 1 < argc) catDir = argv[++i];
+                else if (a == "--character" && i + 1 < argc) character = argv[++i];
+                else if (a == "--out" && i + 1 < argc) outPath = argv[++i];
+                else dir = a;
+            }
+            if (dir.empty() || catDir.empty()) { cerr << "missing mod/catalog\n"; return 2; }
+            return legacyInspect(dir, catDir, character, outPath);
+        }
+        string dir, catDir, out, profile;
+        bool allowReview = false;
+        for (int i = 2; i < argc; i++) {
+            string a = argv[i];
+            if (a == "--catalog" && i + 1 < argc) catDir = argv[++i];
+            else if (a == "--out" && i + 1 < argc) out = argv[++i];
+            else if (a == "--profile" && i + 1 < argc) profile = argv[++i];
+            else if (a == "--allow-review") allowReview = true;
+            else dir = a;
+        }
+        if (dir.empty() || catDir.empty() || out.empty()) { cerr << "missing args\n"; return 2; }
+        if (!profile.empty()) return convertLegacyProfile(dir, catDir, profile, out, allowReview);
+        return convertEfmi(dir, catDir, out);
     } catch (exception& e) { cerr << "ERROR: " << e.what() << "\n"; return 1; }
 }
+
+#endif  /* C4BEN_NO_MAIN */
+
+#ifdef C4BEN_NO_MAIN
+// 供 BEN/ForTMR4A 导入链复用的 C ABI。与 CLI 共用同一套转换实现。
+extern "C" {
+
+static void c4ben_set_error(char* err, unsigned cap, const string& message) {
+    if (!err || cap == 0) return;
+    unsigned n = (unsigned)message.size();
+    if (n >= cap) n = cap - 1;
+    memcpy(err, message.data(), n);
+    err[n] = 0;
+}
+
+// 0 = 不是已知 mod 目录；1 = EFMI；2 = EFF format 3。
+int c4ben_probe(const char* dir) {
+    if (!dir || !*dir) return 0;
+    try {
+        string base(dir);
+        if (!fs::is_directory(base)) return 0;
+        string iniPath = base + "/mod.ini";
+        if (!fs::is_regular_file(iniPath)) return 0;
+        auto ini = Ini::parse(iniPath);
+        if (effKey(ini, "Mod", "format") == "3") return 2;
+        for (auto& s : ini.order) {
+            if (effiComponentMid(s) >= 0) return 1;
+        }
+    } catch (...) {
+    }
+    return 0;
+}
+
+int c4ben_version(void) { return 1; }
+
+int c4ben_convert(const char* dir, const char* catalog_dir, const char* out_path,
+                  char* err, unsigned err_cap) {
+    if (!dir || !*dir || !catalog_dir || !*catalog_dir || !out_path || !*out_path) {
+        c4ben_set_error(err, err_cap, "missing dir/catalog/out");
+        return C4BEN_BAD_ARG;
+    }
+    try {
+        int kind = c4ben_probe(dir);
+        if (kind == 2) return convertEff(dir, catalog_dir, out_path) == 0 ? C4BEN_OK : C4BEN_ERR;
+        if (kind == 1) return convertEfmi(dir, catalog_dir, out_path) == 0 ? C4BEN_OK : C4BEN_ERR;
+        c4ben_set_error(err, err_cap, "unsupported mod directory (no mod.ini components, not EFF 3)");
+        return C4BEN_UNSUPPORTED;
+    } catch (std::exception& e) {
+        c4ben_set_error(err, err_cap, e.what());
+        return C4BEN_ERR;
+    } catch (...) {
+        c4ben_set_error(err, err_cap, "unknown conversion failure");
+        return C4BEN_ERR;
+    }
+}
+
+int c4ben_convert_profile(const char* dir, const char* catalog_dir, const char* profile,
+                          const char* out_path, int allow_review, char* err, unsigned err_cap) {
+    if (!dir || !catalog_dir || !profile || !out_path) {
+        c4ben_set_error(err, err_cap, "missing dir/catalog/profile/out");
+        return C4BEN_BAD_ARG;
+    }
+    try {
+        return convertLegacyProfile(dir, catalog_dir, profile, out_path, allow_review != 0) == 0
+                   ? C4BEN_OK : C4BEN_ERR;
+    } catch (std::exception& e) {
+        c4ben_set_error(err, err_cap, e.what());
+        return C4BEN_ERR;
+    }
+}
+
+}  // extern "C"
+#endif  /* C4BEN_NO_MAIN */
