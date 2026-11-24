@@ -551,7 +551,17 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     cJSON_AddItemToObject(mroot,"appearances",japps);
     char* json = cJSON_PrintUnformatted(mroot); if (!json) throw runtime_error("manifest serialize failed");
     vector<uint8_t> manifest((uint8_t*)json, (uint8_t*)json + strlen(json)); free(json);
-    writeBem(out, manifest, payloads);
+    // 与 EFMI 路径一致：输出名以 .zip 结尾时写 BEM 原生 ZIP 容器，否则写二进制容器。
+    if (out.size() >= 4 && string(out).substr(string(out).size() - 4) == ".zip") {
+        vector<Entry> es; es.push_back({"manifest.json", manifest, 0, 0});
+        for (size_t i = 0; i < payloads.size(); i++) {
+            char nm[64]; snprintf(nm, sizeof nm, "payloads/%04zu.bin", i);
+            es.push_back({nm, payloads[i], 0, 0});
+        }
+        writeZip(out, es);
+    } else {
+        writeBem(out, manifest, payloads);
+    }
     cout << "written " << out << ": meshes=" << cJSON_GetArraySize(jmeshes) << " textures=" << cJSON_GetArraySize(jtextures) << " payloads=" << payloads.size() << "\n";
     cJSON_Delete(mroot); cJSON_Delete(cat.root);
     return 0;
@@ -990,7 +1000,17 @@ static int convertLegacyProfile(const string& dir, const string& catDir, const s
     cJSON_AddItemToObject(root,"appearances",japps);
     char* json = cJSON_PrintUnformatted(root); if (!json) throw runtime_error("manifest serialize failed");
     vector<uint8_t> manifest((uint8_t*)json, (uint8_t*)json + strlen(json)); free(json);
-    writeBem(out, manifest, payloads);
+    // 与 EFMI 路径一致：输出名以 .zip 结尾时写 BEM 原生 ZIP 容器，否则写二进制容器。
+    if (out.size() >= 4 && string(out).substr(string(out).size() - 4) == ".zip") {
+        vector<Entry> es; es.push_back({"manifest.json", manifest, 0, 0});
+        for (size_t i = 0; i < payloads.size(); i++) {
+            char nm[64]; snprintf(nm, sizeof nm, "payloads/%04zu.bin", i);
+            es.push_back({nm, payloads[i], 0, 0});
+        }
+        writeZip(out, es);
+    } else {
+        writeBem(out, manifest, payloads);
+    }
     cout << "written " << out << ": meshes=" << cJSON_GetArraySize(jmeshes) << " textures=" << cJSON_GetArraySize(jtextures) << " payloads=" << payloads.size() << "\n";
     cJSON_Delete(root); cJSON_Delete(pr); cJSON_Delete(cat.root);
     return 0;
