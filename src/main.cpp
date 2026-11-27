@@ -353,6 +353,7 @@ static vector<string> effSplit(const string& s, char c) {
 
 static Cat loadCatalogByCharacter(const string& dir, const string& character);
 static int applyIdentities(Cat& cat);
+static string catalogTextureByDescriptor(cJSON* textures, int w, int h, int mips);
 
 // 按 catalog 的 mesh_name 选择角色（EFF target.asset 就是 mesh_name）
 static Cat loadCatalogByMeshes(const string& dir, const set<string>& meshes) {
@@ -1095,14 +1096,33 @@ static int convertLegacyProfile(const string& dir, const string& catDir, const s
     }
     struct ProfileTex { string name, dds; };
     vector<ProfileTex> profileTex;
+    set<string> usedTexNames;
+    auto addProfileTex = [&](const string& hash, const string& name) {
+        if (hash.empty() || name.empty() || !texDds.count(hash) || usedTexNames.count(name)) return;
+        usedTexNames.insert(name);
+        profileTex.push_back({name, texDds[hash]});
+    };
+    // 1) explicit profile mapping wins
     auto* pts = get(pr, "textures");
     if (cJSON_IsArray(pts)) for (auto* t = pts->child; t; t = t->next) {
         string h = lower(jstr(t, "source_hash")), name = jstr(t, "target_name");
         if (h.empty() || name.empty() || !texDds.count(h)) continue;
-        bool ok = false; if (cJSON_IsObject(cat.textures)) for (auto* ct = cat.textures->child; ct; ct = ct->next) {
-            auto* nm = get(ct, "name"); if (cJSON_IsString(nm) && name == nm->valuestring) { ok = true; break; }
+        bool known = false; if (cJSON_IsObject(cat.textures)) for (auto* ct = cat.textures->child; ct; ct = ct->next) {
+            auto* nm = get(ct, "name"); if (cJSON_IsString(nm) && name == nm->valuestring) { known = true; break; }
         }
-        if (ok) profileTex.push_back({name, texDds[h]});
+        if (known) addProfileTex(h, name);
+    }
+    // 2) direct hash identity from catalog/identities, then optional descriptor fingerprint
+    for (auto& kv : texDds) {
+        auto* ct = cJSON_IsObject(cat.textures) ? cJSON_GetObjectItemCaseSensitive(cat.textures, kv.first.c_str()) : nullptr;
+        auto* nm = ct ? get(ct, "name") : nullptr;
+        if (cJSON_IsString(nm)) { addProfileTex(kv.first, nm->valuestring); continue; }
+        if (!g_textureFingerprint) continue;
+        try {
+            Dds d = readTexture(dir + "/" + kv.second, "");
+            string name = catalogTextureByDescriptor(cat.textures, d.w, d.h, d.mips);
+            if (!name.empty()) { cout << "legacy texture fingerprint: " << kv.first << " -> " << name << "\n"; addProfileTex(kv.first, name); }
+        } catch (exception&) {}
     }
 
     vector<vector<uint8_t>> payloads;

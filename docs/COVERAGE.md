@@ -32,7 +32,7 @@
 | DDS RGBA8 / BGRA8（DXGI 28/87） | ✅ | RGBA32（BGRA 自动换序） |
 | DDS BC6H | ❌ | HDR 无法无损装进 8-bit RGBA32；明确拒绝 |
 | TGA / PNG / JPG | ✅ | RGBA32，mips=1；sRGB 由槽位/文件名推断 |
-| 自定义贴图（catalog 无身份） | 🟡 | `--texture-fingerprint` 可按 catalog descriptor（宽/高/mip）唯一匹配；多候选则跳过 |
+| 自定义贴图（catalog 无身份） | 🟡 | `--texture-fingerprint` 可按 catalog descriptor（宽/高/mip）唯一匹配；多候选则跳过；legacy profile 路径同样生效 |
 
 ## 3. 当前样本覆盖（`tests/coverage.sh`，输出经 `be-bem validate`）
 
@@ -52,7 +52,7 @@
 
 | 样本 | 类型 | 结果 | 说明 |
 |---|---|---|---|
-| FemaleEndminThiccMod | EFMI ALPHA-5 | OK（legacy-auto，10 meshes） | 旧 hash 不匹配；`--character chr_0003_endminf --legacy-auto` 自动生成 profile 并转换（遗留 1 个单骨骼组件因源骨骼数 4>目标 1 拒绝） |
+| FemaleEndminThiccMod | EFMI ALPHA-5 | OK（legacy-auto，10 meshes / 21 textures） | 旧 hash 不匹配；`--character chr_0003_endminf --legacy-auto --texture-fingerprint` 自动 profile + descriptor 贴图匹配（遗留 1 个单骨骼组件因源骨骼数 4>目标 1 拒绝） |
 | SI V1.0 | EFMI | OK（14 meshes） | 修复 `Resource_Texture_<hash>` 段名解析后通过 |
 | Fluorite OG GUI / Avywenna OG GUI | EFMI | OK | 模型包带 GUI |
 | Liino VELMORA / Ardelia SR / yif / kay Graffiti Girl | EFMI | OK | 含 keep 组件 |
