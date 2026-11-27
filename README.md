@@ -32,6 +32,8 @@ make            # -> build/c4ben
 ./build/c4ben convert <old-mod> --catalog <catalog> --profile mapping.json --allow-review --out <输出.bem>
 # 一键：自动 inspect + 生成 draft profile + 转换（适合旧 ALPHA 包）
 ./build/c4ben convert <old-mod> --catalog <catalog> --character chr_XXXX --legacy-auto --out <输出.bem>
+# 贴图 hash 漂移时按 catalog descriptor 唯一匹配（L3 推断，可关）
+./build/c4ben convert <mod> --catalog <catalog> --texture-fingerprint --out <输出.bem>
 ```
 
 - `<mod目录>` 需要有 `mod.ini`（EFMI 目录/解压后的包）。

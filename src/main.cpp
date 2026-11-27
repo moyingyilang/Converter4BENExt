@@ -24,6 +24,7 @@
 #include "c4ben.h"
 
 using namespace std;
+static bool g_textureFingerprint = false;
 namespace fs = std::filesystem;
 
 struct Ini {
@@ -418,6 +419,7 @@ struct EffMatData {
     map<string,double> floats;
     map<string,array<double,4>> colors;
     vector<string> enableKeywords, disableKeywords;
+    map<string,bool> shaderPasses;
     int renderQueue = -1;
 };
 
@@ -479,6 +481,37 @@ static EffMatData parseEffMaterial(const string& path) {
             string name = line.substr(8, eq - 8);
             if (!validKeyword(name)) continue;
             (parseDouble(line.substr(eq + 1)) > 0.5 ? d.enableKeywords : d.disableKeywords).push_back(name);
+        }
+    }
+    auto marker = text.find(";EFF_MATERIAL_IMPORT=");
+    if (marker != string::npos) {
+        const string js = text.substr(marker + strlen(";EFF_MATERIAL_IMPORT="));
+        cJSON* root = cJSON_ParseWithLength(js.data(), js.size());
+        if (root) {
+            auto* value = get(root, "value");
+            if (cJSON_IsObject(value)) {
+                auto* passes = get(value, "disabledShaderPasses");
+                if (cJSON_IsArray(passes)) for (auto* pass = passes->child; pass; pass = pass->next) {
+                    if (!cJSON_IsString(pass)) continue;
+                    string name = pass->valuestring;
+                    if (name.empty() || name.size() > 96 || name.front() == ' ' || name.back() == ' ') continue;
+                    bool printable = true; for (unsigned char c : name) if (c < 0x20 || c > 0x7e) printable = false;
+                    if (printable) d.shaderPasses[name] = false;
+                }
+                auto addKeywords = [&](const char* field, bool enabled) {
+                    auto* arr = get(value, field);
+                    if (!cJSON_IsArray(arr)) return;
+                    for (auto* kw = arr->child; kw; kw = kw->next) {
+                        if (!cJSON_IsString(kw) || !validKeyword(kw->valuestring)) continue;
+                        string name = kw->valuestring;
+                        auto& list = enabled ? d.enableKeywords : d.disableKeywords;
+                        if (find(list.begin(), list.end(), name) == list.end()) list.push_back(name);
+                    }
+                };
+                addKeywords("m_ValidKeywords", true);
+                addKeywords("m_InvalidKeywords", false);
+            }
+            cJSON_Delete(root);
         }
     }
     return d;
@@ -681,6 +714,12 @@ static int convertEff(const string& dir, const string& catDir, const string& out
                 if (!md.disableKeywords.empty()) {
                     cJSON* arr = jarr(); for (auto& k : md.disableKeywords) jadd(arr, jstrv(k));
                     cJSON_AddItemToObject(mo, "disable_keywords", arr); any = true;
+                }
+                if (!md.shaderPasses.empty()) {
+                    cJSON* sp = obj(nullptr);
+                    for (auto& kv : md.shaderPasses) cJSON_AddBoolToObject(sp, kv.first.c_str(), kv.second);
+                    cJSON_AddItemToObject(mo, "shader_passes", sp);
+                    any = true; hasRenderState = true;
                 }
                 if (md.renderQueue >= -1 && md.renderQueue <= 5000) {
                     cJSON_AddNumberToObject(mo, "render_queue", md.renderQueue);
@@ -1266,6 +1305,26 @@ static int convertLegacyProfile(const string& dir, const string& catDir, const s
 
 
 // EFMI 转换主流程（从 CLI 中抽出，供 C ABI 复用）。
+// Unique-ish fallback for catalog hash drift: match a source DDS against catalog
+// texture descriptors (width/height/mip count). Opt-in via --texture-fingerprint;
+// only a single surviving candidate is accepted, anything else is reported.
+static string catalogTextureByDescriptor(cJSON* textures, int w, int h, int mips) {
+    if (!cJSON_IsObject(textures)) return "";
+    string match; int hits = 0;
+    for (auto* t = textures->child; t; t = t->next) {
+        auto* name = get(t, "name");
+        if (!cJSON_IsString(name)) continue;
+        auto* evidence = get(t, "evidence");
+        auto* descriptor = evidence ? get(evidence, "descriptor") : nullptr;
+        if (!cJSON_IsArray(descriptor) || cJSON_GetArraySize(descriptor) < 2) continue;
+        int dw = cJSON_GetArrayItem(descriptor, 0)->valueint;
+        int dh = cJSON_GetArrayItem(descriptor, 1)->valueint;
+        int dm = cJSON_GetArraySize(descriptor) > 3 ? cJSON_GetArrayItem(descriptor, 3)->valueint : 1;
+        if (dw == w && dh == h && (dm <= 0 || dm == mips)) { ++hits; match = name->valuestring; }
+    }
+    return hits == 1 ? match : "";
+}
+
 static int convertEfmi(const string& dir, const string& catDir, const string& out) {
         auto ini = Ini::parse(dir + "/mod.ini");
         if (effKey(ini, "Mod", "format") == "3") return convertEff(dir, catDir, out);
@@ -1307,9 +1366,17 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             auto it = ini.sec[s].find("filename"); if (it == ini.sec[s].end()) continue;
             auto hs = ini.sec["TextureOverride_Texture" + to_string(n)].find("hash");
             if (hs == ini.sec["TextureOverride_Texture" + to_string(n)].end()) continue;
-            auto tn = texName.find(lower(hs->second)); if (tn == texName.end()) continue;
-            try { texRes[n] = {tn->second, readTexture(dir + "/" + it->second, tn->second)}; }
-            catch (exception& e) { cerr << "texture skip " << it->second << ": " << e.what() << "\n"; }
+            auto tn = texName.find(lower(hs->second));
+            try {
+                Dds d = readTexture(dir + "/" + it->second, tn != texName.end() ? tn->second : "");
+                string name = tn != texName.end() ? tn->second : "";
+                if (name.empty() && g_textureFingerprint) {
+                    name = catalogTextureByDescriptor(cat.textures, d.w, d.h, d.mips);
+                    if (!name.empty()) cout << "texture fingerprint: " << hs->second << " -> " << name << "\n";
+                }
+                if (name.empty()) continue;
+                texRes[n] = {name, d};
+            } catch (exception& e) { cerr << "texture skip " << it->second << ": " << e.what() << "\n"; }
         }
         cout << "textures: " << texRes.size() << " matched\n";
 
@@ -1568,7 +1635,8 @@ int main(int argc, char** argv) {
         if (argc < 2 || (string(argv[1]) != "convert" && string(argv[1]) != "inspect-legacy" && string(argv[1]) != "map")) {
             cerr << "usage: c4ben convert <mod-dir> --catalog <catalog-dir> --out <out.bem>\n"
                     "       c4ben inspect-legacy|map <old-mod-dir> --catalog <dir> --character <chr_...> [--out mapping.json]\n"
-                    "       c4ben convert <old-mod-dir> --catalog <dir> --character <chr_...> --legacy-auto --out <out.bem>\n"; return 2;
+                    "       c4ben convert <old-mod-dir> --catalog <dir> --character <chr_...> --legacy-auto --out <out.bem>\n"
+                    "       add --texture-fingerprint to map hash-drifted DDS by unique descriptor\n"; return 2;
         }
         if (string(argv[1]) == "inspect-legacy" || string(argv[1]) == "map") {
             string dir, catDir, character, outPath;
@@ -1592,6 +1660,7 @@ int main(int argc, char** argv) {
             else if (a == "--character" && i + 1 < argc) character = argv[++i];
             else if (a == "--allow-review") allowReview = true;
             else if (a == "--legacy-auto") legacyAuto = true;
+            else if (a == "--texture-fingerprint") g_textureFingerprint = true;
             else dir = a;
         }
         if (dir.empty() || catDir.empty() || out.empty()) { cerr << "missing args\n"; return 2; }

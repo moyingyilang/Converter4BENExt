@@ -16,7 +16,7 @@
 | EFF | Format 3（`EFF_AUTHOR_FILE3` v3, kind=1） | ✅ | Replace/Part/Mesh/Material/Texture |
 | EFF | `handling=replace/keep/skip/hide` | ✅ | hide → BEM `operation: hide`，skip/keep → `keep` |
 | EFF | `.effres` kind=2 材质参数/颜色/关键字 | ✅ | 解析 `float.*` / `value4.*` / `keyword.*` / `render_queue`，输出 BEM 1.5 `draws[].material_overrides` |
-| EFF | `render_queue` / 渲染状态 | ✅ | 输出 BEM 1.5 `material_overrides.render_queue` + `material-render-state-v1`（shader_passes 暂无来源） |
+| EFF | `render_queue` / 渲染状态 | ✅ | 输出 `material_overrides.render_queue` + `shader_passes`（来自材质 JSON 的 `disabledShaderPasses`），声明 `material-render-state-v1` |
 | EFF | 物理/特效/blendshape/LOD | ❌ | 不是 BEM 1.0 可表达范围，需明确声明不支持 |
 | EFF | 运行期骨骼重定向 Compute Shader | ❌ | 跨 IB 绘制依赖它；删掉会错绑 |
 | EFF/EFMI | 非 catalog 的自定义贴图/材质 | ❌ | 需要 donor 或 catalog 材质表；当前跳过并报错 |
@@ -31,7 +31,7 @@
 | DDS RGBA8 / BGRA8（DXGI 28/87） | ✅ | RGBA32（BGRA 自动换序） |
 | DDS BC6H | ❌ | HDR 无法无损装进 8-bit RGBA32；明确拒绝 |
 | TGA / PNG / JPG | ✅ | RGBA32，mips=1；sRGB 由槽位/文件名推断 |
-| 自定义贴图（catalog 无身份） | ❌ | 跳过并报告 |
+| 自定义贴图（catalog 无身份） | 🟡 | `--texture-fingerprint` 可按 catalog descriptor（宽/高/mip）唯一匹配；多候选则跳过 |
 
 ## 3. 当前样本覆盖（`tests/coverage.sh`，输出经 `be-bem validate`）
 
