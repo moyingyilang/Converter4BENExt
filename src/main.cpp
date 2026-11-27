@@ -404,8 +404,12 @@ static bool effFindBone(Cat& cat, const string& path, int prefer, int& ocid, int
     return false;
 }
 static bool effCatalogTexture(Cat& cat, const string& name, string& original) {
-    if (!cJSON_IsObject(cat.textures)) return false;
-    for (auto* t = cat.textures->child; t; t = t->next) { auto* n = get(t, "name"); if (cJSON_IsString(n) && name == n->valuestring) { original = n->valuestring; return true; } }
+    if (!cJSON_IsObject(cat.textures) || name.empty()) return false;
+    const string wanted = lower(name);
+    for (auto* t = cat.textures->child; t; t = t->next) {
+        auto* n = get(t, "name");
+        if (cJSON_IsString(n) && lower(n->valuestring) == wanted) { original = n->valuestring; return true; }
+    }
     return false;
 }
 
@@ -427,6 +431,18 @@ static int convertEff(const string& dir, const string& catDir, const string& out
         map<string,string> d; effSection(ini, s, d);
         if (s.rfind("Texture", 0) == 0 && s.rfind("TextureOverride", 0) != 0) {
             auto dds = effKey(ini, s, "dds"), asset = effKey(ini, s, "source.asset");
+            if (asset.empty()) {
+                // Most EFF packages declare only source.path; the catalog key is the
+                // basename without extension (e.g. .../t_actor_laevat_body_01_d.tga).
+                auto path = effKey(ini, s, "source.path");
+                if (!path.empty()) {
+                    for (auto& ch : path) if (ch == '\\') ch = '/';
+                    auto slash = path.find_last_of('/');
+                    asset = slash == string::npos ? path : path.substr(slash + 1);
+                    auto dot = asset.find_last_of('.');
+                    if (dot != string::npos) asset.resize(dot);
+                }
+            }
             if (!dds.empty()) tex[s] = {dds, asset};
         } else if (s.rfind("Material", 0) == 0 && s.rfind("MaterialTrack", 0) != 0) {
             EffMat m; m.asset = effKey(ini, s, "source.asset");
