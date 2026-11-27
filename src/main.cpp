@@ -1466,8 +1466,15 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
         if (effKey(ini, "Mod", "format") == "3") return convertEff(dir, catDir, out);
         int componentEntries = 0;
         for (auto& section : ini.order) if (effiComponentMid(section) >= 0) ++componentEntries;
-        if (componentEntries == 0)
+        if (componentEntries == 0) {
+            bool dynamicPool = false;
+            for (auto& section : ini.order)
+                if (section.find("Pool_MergedSkeleton") != string::npos ||
+                    section.find("CommandList_MergedSkeleton") != string::npos) dynamicPool = true;
+            if (dynamicPool)
+                throw runtime_error("dynamic EFMI merged-skeleton/pool mod (no static Component resources); not supported yet");
             throw runtime_error("not an EFMI model package (no TextureOverride_Component entry points)");
+        }
         auto optionGroups = detectEfmiOptions(ini);
         if (!optionGroups.empty()) {
             cout << "options detected: " << optionGroups.size() << " groups (BEM option_groups mapping not implemented yet)\n";

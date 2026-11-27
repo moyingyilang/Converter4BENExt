@@ -90,7 +90,7 @@ make            # -> build/c4ben
 - EFMI 支持标准 ComponentN 的 skin stride 4/8/12/16/24（8/4/24 为 L3 推断，见 docs/COVERAGE.md）；EFMI 选项/热键/多外观会检测并打印（KeySwap/KeyToggle），但还没有映射到 BEM option_groups。
 - 合并不住的组件会 `keep`，不猜；catalog 缺 hash 的包不输出，或走 `inspect-legacy` 兼容层。
 - 旧版 catalog/资源缺失时无法自动完成身份锚定（样本：庄方宜旧包）；EFMI ALPHA-5 包可用 `--legacy-auto --texture-fingerprint` 恢复几何+贴图。
-- 非模型包（GUI/HUD）会明确报错，不再误报 catalog 不匹配。
+- 非模型包（GUI/HUD/POI）与动态 `Pool_MergedSkeleton` EFMI 变体会明确报错，不再误报 catalog 不匹配。
 - 二进制 payload 未压缩；大包会到几十 MB。
 - 只用 BEN 的读取器/校验器对拍，未替换 BEN 自己的转换器；实机渲染仍需作者验证。
 

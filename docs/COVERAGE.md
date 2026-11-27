@@ -22,6 +22,7 @@
 | EFF | 运行期骨骼重定向 Compute Shader | ❌ | 跨 IB 绘制依赖它；删掉会错绑 |
 | EFF/EFMI | 非 catalog 的自定义贴图/材质 | ❌ | 需要 donor 或 catalog 材质表；当前跳过并报错 |
 | 3DMigoto 非 EFMI 包 | 纯 `ShaderOverride`/command list | ❌ | 没有网格入口，不在当前迁移范围 |
+| EFMI 动态合并骨架 | `Pool_MergedSkeleton*` / `CommandList_MergedSkeleton*`，无静态 Component | ❌ | 依赖运行期池/命令列表拼装，当前明确拒绝；需专门解析器 |
 
 ## 2. 纹理
 
@@ -82,6 +83,17 @@
 - 只补 `hash → component` / `hash → texture name`，不生成布局；native layout 不支持仍会明确失败；
 - 冲突（同一 hash 指向不同目标）直接拒绝；重复相同值跳过；
 - 可配合 `--character` 强制目标角色。
+
+## 3.3 2026-11 第二批样本（GameBanana 43 个含 mod.ini）
+
+| 类别 | 数量 | 结果 |
+|---|---|---|
+| EFMI 静态 Component 包（含 OG GUI / 角色换装） | 30+ | ✅ 转换 + `be-bem validate` 通过（如 Typhoeus 13 meshes/26 textures、SI 14/34、Yvonne maid 10/16） |
+| EFF Format 3（si / lx / chen / tangtang） | 4 | ✅ 转换 + 校验通过 |
+| Loot Beacons 子包（POI/宝箱/收集物） | 5 | ❌ 非角色模型包，明确拒绝 |
+| GUI/杂项（LZY、gift） | 2 | ❌ 非模型包，明确拒绝 |
+| 武器/外观（Khravengger） | 1 | ❌ 当前 catalog 无目标 |
+| 动态合并骨架（Si-Series3、Tangtang-Series1） | 2 | ❌ 新识别变体，明确报错（非静态 Component） |
 
 ## 4. 仍有缺口（需要更多样本/旧资料）
 
