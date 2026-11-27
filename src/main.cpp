@@ -25,6 +25,8 @@
 
 using namespace std;
 static bool g_textureFingerprint = false;
+static string g_forceCharacter;
+static cJSON* g_identities = nullptr;
 namespace fs = std::filesystem;
 
 struct Ini {
@@ -349,6 +351,9 @@ static vector<string> effSplit(const string& s, char c) {
     return out;
 }
 
+static Cat loadCatalogByCharacter(const string& dir, const string& character);
+static int applyIdentities(Cat& cat);
+
 // 按 catalog 的 mesh_name 选择角色（EFF target.asset 就是 mesh_name）
 static Cat loadCatalogByMeshes(const string& dir, const set<string>& meshes) {
     Cat best; int bestHit = -1;
@@ -568,7 +573,9 @@ static int convertEff(const string& dir, const string& catDir, const string& out
             if (!ta.empty()) targetMeshes.insert(ta);
         }
     }
-    auto cat = loadCatalogByMeshes(catDir, targetMeshes);
+    Cat cat = g_forceCharacter.empty() ? loadCatalogByMeshes(catDir, targetMeshes)
+                                       : loadCatalogByCharacter(catDir, g_forceCharacter);
+    applyIdentities(cat);
     cout << "target: " << cat.character << " (" << jstr(cat.root, "name") << "), target meshes " << targetMeshes.size() << "\n";
 
     vector<vector<uint8_t>> payloads;
@@ -1325,6 +1332,48 @@ static string catalogTextureByDescriptor(cJSON* textures, int w, int h, int mips
     return hits == 1 ? match : "";
 }
 
+// Optional identity map supplied by an external extractor (ForTMR/BEN tools):
+//   {"characters":{"chr_x":{"entries":{"<hash>":3},"textures":{"<hash>":"T_actor_..."}}}}
+// It only fills hash→component / hash→texture-name gaps; layouts still come from
+// the BEN catalog, so unsupported native layouts still fail loudly.
+static int applyIdentities(Cat& cat) {
+    if (!g_identities) return 0;
+    auto* characters = get(g_identities, "characters");
+    auto* entry = characters ? get(characters, cat.character.c_str()) : nullptr;
+    if (!cJSON_IsObject(entry)) return 0;
+    int applied = 0;
+    auto* entries = get(entry, "entries");
+    if (cJSON_IsObject(entries) && cJSON_IsObject(cat.entries)) for (auto* e = entries->child; e; e = e->next) {
+        if (!cJSON_IsNumber(e)) continue;
+        auto* old = cJSON_GetObjectItemCaseSensitive(cat.entries, e->string);
+        if (old) {
+            if (!cJSON_IsNumber(old) || old->valueint != e->valueint)
+                throw runtime_error("identities conflict for component hash " + string(e->string));
+            continue;
+        }
+        cJSON* copy = cJSON_CreateNumber(e->valueint);
+        cJSON_AddItemToObject(cat.entries, e->string, copy); ++applied;
+    }
+    auto* textures = get(entry, "textures");
+    if (cJSON_IsObject(textures) && cJSON_IsObject(cat.textures)) for (auto* t = textures->child; t; t = t->next) {
+        string name = cJSON_IsString(t) ? t->valuestring : jstr(t, "name");
+        if (name.empty()) continue;
+        auto* old = cJSON_GetObjectItemCaseSensitive(cat.textures, t->string);
+        if (old) {
+            auto* oldName = get(old, "name");
+            if (cJSON_IsString(oldName) && name != oldName->valuestring)
+                throw runtime_error("identities conflict for texture hash " + string(t->string));
+            continue;
+        }
+        cJSON* obj = cJSON_CreateObject(); cJSON_AddStringToObject(obj, "name", name.c_str());
+        cJSON_AddItemToObject(cat.textures, t->string, obj);
+        cJSON_AddStringToObject(obj, "source", "external-identities");
+        ++applied;
+    }
+    cout << "identities: applied " << applied << " entries for " << cat.character << "\n";
+    return applied;
+}
+
 static int convertEfmi(const string& dir, const string& catDir, const string& out) {
         auto ini = Ini::parse(dir + "/mod.ini");
         if (effKey(ini, "Mod", "format") == "3") return convertEff(dir, catDir, out);
@@ -1337,7 +1386,9 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             if (effiComponentMid(s) < 0) continue;
             auto it = ini.sec[s].find("hash"); if (it != ini.sec[s].end()) hashes.push_back(lower(it->second));
         }
-        auto cat = loadCatalog(catDir, hashes);
+        Cat cat = g_forceCharacter.empty() ? loadCatalog(catDir, hashes)
+                                           : loadCatalogByCharacter(catDir, g_forceCharacter);
+        applyIdentities(cat);
         cout << "target: " << cat.character << " (" << jstr(cat.root, "name") << "), matched " << hashes.size() << " entries\n";
 
         // map mod component -> catalog component id
@@ -1357,25 +1408,30 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             auto nm = get(t, "name"); if (cJSON_IsString(nm)) texName[lower(string(t->string))] = nm->valuestring;
         }
         struct TexRes { string name; Dds dds; };
-        map<int, TexRes> texRes;
+        map<string, TexRes> texRes;
         for (auto& s : ini.order) {
             if (s.rfind("Resource_Texture", 0) != 0) continue;
-            const string number = s.substr(strlen("Resource_Texture"));
-            if (number.empty() || number.find_first_not_of("0123456789") != string::npos) continue;
-            int n = stoi(number);
+            const string suffix = s.substr(strlen("Resource_Texture"));
+            string hash;
+            if (!suffix.empty() && suffix[0] == '_') {
+                // 新 EFMI：Resource_Texture_<hash> / TextureOverride_Texture_<hash>
+                hash = lower(suffix.substr(1));
+            } else if (!suffix.empty() && suffix.find_first_not_of("0123456789") == string::npos) {
+                auto hs = ini.sec["TextureOverride_Texture" + suffix].find("hash");
+                if (hs != ini.sec["TextureOverride_Texture" + suffix].end()) hash = lower(hs->second);
+            }
+            if (hash.empty()) continue;
             auto it = ini.sec[s].find("filename"); if (it == ini.sec[s].end()) continue;
-            auto hs = ini.sec["TextureOverride_Texture" + to_string(n)].find("hash");
-            if (hs == ini.sec["TextureOverride_Texture" + to_string(n)].end()) continue;
-            auto tn = texName.find(lower(hs->second));
+            auto tn = texName.find(hash);
             try {
                 Dds d = readTexture(dir + "/" + it->second, tn != texName.end() ? tn->second : "");
                 string name = tn != texName.end() ? tn->second : "";
                 if (name.empty() && g_textureFingerprint) {
                     name = catalogTextureByDescriptor(cat.textures, d.w, d.h, d.mips);
-                    if (!name.empty()) cout << "texture fingerprint: " << hs->second << " -> " << name << "\n";
+                    if (!name.empty()) cout << "texture fingerprint: " << hash << " -> " << name << "\n";
                 }
                 if (name.empty()) continue;
-                texRes[n] = {name, d};
+                texRes[hash] = {name, d};
             } catch (exception& e) { cerr << "texture skip " << it->second << ": " << e.what() << "\n"; }
         }
         cout << "textures: " << texRes.size() << " matched\n";
@@ -1643,7 +1699,7 @@ int main(int argc, char** argv) {
             for (int i = 2; i < argc; i++) {
                 string a = argv[i];
                 if (a == "--catalog" && i + 1 < argc) catDir = argv[++i];
-                else if (a == "--character" && i + 1 < argc) character = argv[++i];
+                else if (a == "--character" && i + 1 < argc) { character = argv[++i]; g_forceCharacter = character; }
                 else if (a == "--out" && i + 1 < argc) outPath = argv[++i];
                 else dir = a;
             }
@@ -1661,6 +1717,11 @@ int main(int argc, char** argv) {
             else if (a == "--allow-review") allowReview = true;
             else if (a == "--legacy-auto") legacyAuto = true;
             else if (a == "--texture-fingerprint") g_textureFingerprint = true;
+            else if (a == "--identities" && i + 1 < argc) {
+                auto bytes = readFile(argv[++i]);
+                g_identities = cJSON_ParseWithLength((const char*)bytes.data(), bytes.size());
+                if (!g_identities) { cerr << "identities JSON parse failed\n"; return 2; }
+            }
             else dir = a;
         }
         if (dir.empty() || catDir.empty() || out.empty()) { cerr << "missing args\n"; return 2; }

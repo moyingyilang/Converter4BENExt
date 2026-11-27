@@ -6,13 +6,14 @@
 
 | 来源 | 变体 | 状态 | 说明 |
 |---|---|---|---|
-| EFMI | 标准 `ComponentN` 合并骨架，skin stride **16** | ✅ | 4×UNORM16 权重 + 4×UINT16 全局 id |
+| EFMI | 标准 `ComponentN` / 新 `EntryPoint_ComponentN` 合并骨架，skin stride **16** | ✅ | 4×UNORM16 权重 + 4×UINT16 全局 id |
 | EFMI | 旧 ALPHA，skin stride **12** | ✅ | u16 权重 + u8 本地骨骼索引 |
 | EFMI | 合并骨架，skin stride **8** | ✅（L3 推断） | Playbook：4×UINT16 全局 id 的刚性布局，取首个 id；其余 id 仅校验 |
 | EFMI | 刚性 skin stride **4** | ✅（L3 推断） | 首个 UINT16 为全局骨骼 id，其余为填充 |
 | EFMI | 浮点权重 skin stride **24** | ✅（L3 推断） | 4×FLOAT32 权重（归一化后量化）+ 4×UINT16 全局 id；样本：伊冯 comp10 |
 | EFMI | 旧版 hash 不匹配当前 catalog | ✅ | `inspect-legacy` + `--profile`，或一键 `convert --character <chr> --legacy-auto`（自动生成 draft profile 并转换）；仅旧 mod 无法可靠映射时仍会拒绝 |
 | EFMI | 选项/热键/多外观 | ❌ | 目前固定单外观；BEM 1.1 option_groups 尚未映射 |
+| EFMI | 新贴图段名 `Resource_Texture_<hash>` + `TextureOverride_Texture_<hash>` | ✅ | 旧 `TextureNNN` 与新 hash 命名都支持（样本 SI V1.0：贴图 0→31） |
 | EFF | Format 3（`EFF_AUTHOR_FILE3` v3, kind=1） | ✅ | Replace/Part/Mesh/Material/Texture |
 | EFF | `handling=replace/keep/skip/hide` | ✅ | hide → BEM `operation: hide`，skip/keep → `keep` |
 | EFF | `.effres` kind=2 材质参数/颜色/关键字 | ✅ | 解析 `float.*` / `value4.*` / `keyword.*` / `render_queue`，输出 BEM 1.5 `draws[].material_overrides` |
@@ -56,9 +57,30 @@
 | Fluorite OG GUI / Avywenna OG GUI | EFMI | OK | 模型包带 GUI |
 | Liino VELMORA / Ardelia SR / yif / kay Graffiti Girl | EFMI | OK | 含 keep 组件 |
 | 8 个 Kay 分类 mod | EFMI | FAIL | 当前 catalog 没有 Kay 角色 → 需要新 catalog/游戏资源 |
+| SI V1.0（新 EFMI 段名） | EFMI | OK | 修复 `Resource_Texture_<hash>` 段名后贴图 0→31，含 `material_overrides` 验证通过 |
 | Advanced HUD Control / Dynamic Login Screen | GUI | 明确拒绝 | 不是模型包（无 Component 入口） |
 
 新增健壮性：非模型包给出明确错误；`Resource_Texture_<hash>`、缺 stride 不再抛 `stoi`。
+
+## 3.2 外部 identity 适配（ForTMR/BEN 工具输出）
+
+`convert --identities <json>` 接受外部提取器产出的中性映射，用于 hash 漂移或旧版本：
+
+```json
+{
+  "schema": 1,
+  "characters": {
+    "chr_0036_jsspsi": {
+      "entries": {"<EFMI component hash>": 3},
+      "textures": {"<texture hash>": "T_actor_jsspsi_body_01_D"}
+    }
+  }
+}
+```
+
+- 只补 `hash → component` / `hash → texture name`，不生成布局；native layout 不支持仍会明确失败；
+- 冲突（同一 hash 指向不同目标）直接拒绝；重复相同值跳过；
+- 可配合 `--character` 强制目标角色。
 
 ## 4. 仍有缺口（需要更多样本/旧资料）
 

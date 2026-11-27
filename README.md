@@ -34,6 +34,8 @@ make            # -> build/c4ben
 ./build/c4ben convert <old-mod> --catalog <catalog> --character chr_XXXX --legacy-auto --out <输出.bem>
 # 贴图 hash 漂移时按 catalog descriptor 唯一匹配（L3 推断，可关）
 ./build/c4ben convert <mod> --catalog <catalog> --texture-fingerprint --out <输出.bem>
+# 外部提取器（ForTMR 等）给出的 hash→component/texture 身份映射
+./build/c4ben convert <mod> --catalog <catalog> --identities identities.json --out <输出.bem>
 ```
 
 - `<mod目录>` 需要有 `mod.ini`（EFMI 目录/解压后的包）。
