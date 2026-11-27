@@ -7,7 +7,7 @@
 
 - 语言：C++17（无 Python、无 .NET 运行时）
 - 依赖：clang++/gcc、zlib；cJSON 已 vendored（MIT）
-- 状态：**MVP**。EFMI 标准 ComponentN + 合并骨架已能出包；EFF Format 3 已接入（实验性）
+- 状态：EFMI 标准 ComponentN + 合并骨架、EFF Format 3 已能出包；来源覆盖矩阵见 [`docs/COVERAGE.md`](docs/COVERAGE.md)
 
 ## 为什么只做迁移
 
@@ -76,11 +76,13 @@ make            # -> build/c4ben
 
 ## 已知限制
 
-- EFF 的材质/贴图只在 catalog 里能找到同名 `source.asset` 时绑定；自定义 Liino 贴图会跳过。
+- 贴图：DDS BC1/3/4/5/7 原生直通；BC2/DXT3 解码为 RGBA32；TGA/PNG/JPG 解码为 RGBA32；BC6H（HDR）明确拒绝。
+- EFF 的材质/贴图只在 catalog 里能找到同名 `source.asset` 时绑定；自定义 Liino 贴图会跳过并报告。
 - EFF 辅助骨骼用祖先替代，会损失飘带/裙摆的二级摆动。
 - EFF 的 blendshape、物理、特效、LOD 不转。
-- EFMI 只支持标准 ComponentN；EFMI 选项/热键/多外观还没有映射到 BEM option_groups。
-- 合并不住的组件会 `keep`，不猜；catalog 缺 hash 的包不输出。
+- EFMI 支持标准 ComponentN 的 skin stride 4/8/12/16/24（8/4/24 为 L3 推断，见 docs/COVERAGE.md）；EFMI 选项/热键/多外观还没有映射到 BEM option_groups。
+- 合并不住的组件会 `keep`，不猜；catalog 缺 hash 的包不输出，或走 `inspect-legacy` 兼容层。
+- 旧版 catalog/资源缺失时无法自动完成身份锚定（样本：庄方宜旧包）。
 - 二进制 payload 未压缩；大包会到几十 MB。
 - 只用 BEN 的读取器/校验器对拍，未替换 BEN 自己的转换器；实机渲染仍需作者验证。
 

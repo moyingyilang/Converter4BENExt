@@ -14,6 +14,12 @@
 #include <unordered_map>
 #include <vector>
 #include <zlib.h>
+#define BCDEC_IMPLEMENTATION
+#define BCDEC_STATIC
+#include "bcdec.h"
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_STATIC
+#include "stb_image.h"
 #include "third_party/cJSON.h"
 #include "c4ben.h"
 
@@ -53,8 +59,42 @@ static vector<uint8_t> readFile(const string& p) {
     return vector<uint8_t>((istreambuf_iterator<char>(f)), istreambuf_iterator<char>());
 }
 
+static string lower(string s);
 struct Dds { int w, h, mips, fmt; bool srgb; vector<uint8_t> data; };
 static uint32_t rd32(const vector<uint8_t>& b, size_t o) { return (uint32_t)b[o] | ((uint32_t)b[o+1] << 8) | ((uint32_t)b[o+2] << 16) | ((uint32_t)b[o+3] << 24); }
+
+// Decode a BC2/DXT3 chain to RGBA32: the BEM runtime does not accept BC2, so the
+// converter expands it instead of dropping the texture.
+static void decodeBc2ToRgba(Dds& d, const vector<uint8_t>& in, size_t off) {
+    vector<uint8_t> out;
+    size_t src = off;
+    int w = d.w, h = d.h;
+    for (int m = 0; m < d.mips; m++) {
+        int mw = std::max(1, w >> m), mh = std::max(1, h >> m);
+        int bw = (mw + 3) / 4, bh = (mh + 3) / 4;
+        size_t need = (size_t)bw * bh * 16;
+        if (src + need > in.size()) throw runtime_error("truncated BC2 DDS");
+        size_t base = out.size();
+        out.resize(base + (size_t)mw * mh * 4);
+        for (int by = 0; by < bh; by++) for (int bx = 0; bx < bw; bx++) {
+            uint8_t block[64];
+            bcdec_bc2(in.data() + src + ((size_t)by * bw + bx) * 16, block, 16);
+            for (int py = 0; py < 4; py++) for (int px = 0; px < 4; px++) {
+                int x = bx * 4 + px, y = by * 4 + py;
+                if (x >= mw || y >= mh) continue;
+                memcpy(&out[base + ((size_t)y * mw + x) * 4], &block[(py * 4 + px) * 4], 4);
+            }
+        }
+        src += need;
+    }
+    d.data.swap(out);
+    d.fmt = 4;
+}
+
+static void bgraToRgba(vector<uint8_t>& data) {
+    for (size_t i = 0; i + 3 < data.size(); i += 4) std::swap(data[i], data[i + 2]);
+}
+
 static Dds readDds(const string& path) {
     auto b = readFile(path);
     if (b.size() < 128 || memcmp(b.data(), "DDS ", 4)) throw runtime_error("not DDS: " + path);
@@ -63,6 +103,7 @@ static Dds readDds(const string& path) {
     size_t off = 128; int code = -1;
     if (fourcc == "DX10") { code = rd32(b, 128); off = 148; }
     else if (fourcc == "DXT1") code = 71; else if (fourcc == "DXT5") code = 77;
+    else if (fourcc == "DXT3") code = 74;
     else if (fourcc == "ATI1" || fourcc == "BC4U") code = 80; else if (fourcc == "ATI2" || fourcc == "BC5U") code = 83;
     switch (code) {
         case 71: d.fmt = 10; d.srgb = false; break; case 72: d.fmt = 10; d.srgb = true; break;
@@ -70,11 +111,46 @@ static Dds readDds(const string& path) {
         case 80: d.fmt = 26; d.srgb = false; break; case 81: d.fmt = 26; d.srgb = true; break;
         case 83: d.fmt = 27; d.srgb = false; break; case 84: d.fmt = 27; d.srgb = true; break;
         case 98: d.fmt = 25; d.srgb = false; break; case 99: d.fmt = 25; d.srgb = true; break;
-        case 28: case 87: d.fmt = 4; d.srgb = false; break;
+        case 74: case 75: {
+            if (b.size() < off) throw runtime_error("truncated DDS " + path);
+            decodeBc2ToRgba(d, b, off);
+            d.srgb = (code == 75);
+            return d;
+        }
+        case 95: case 96: throw runtime_error("BC6H HDR is not representable as BEM RGBA32 (8-bit): " + path);
+        case 28: case 87: {
+            d.fmt = 4; d.srgb = false;
+            d.data.assign(b.begin() + off, b.end());
+            if (code == 87) bgraToRgba(d.data);
+            return d;
+        }
         default: throw runtime_error("unsupported DDS format " + to_string(code) + " in " + path);
     }
     if (b.size() < off) throw runtime_error("truncated DDS " + path);
     d.data.assign(b.begin() + off, b.end());
+    return d;
+}
+
+static bool linearTextureName(const string& name) {
+    string s = lower(name);
+    for (const char* token : {"_n", "normal", "_nm", "_mask", "rough", "metal", "_mra", "_orm", "_p"}) {
+        if (s.find(token) != string::npos) return true;
+    }
+    return false;
+}
+
+// DDS keeps its native format (BC1/3/4/5/7, RGBA); TGA/PNG/JPG are decoded to
+// RGBA32, which BEM accepts. sRGB is inferred from the slot/asset name.
+static Dds readTexture(const string& path, const string& hint) {
+    string p = lower(path);
+    if (p.size() >= 4 && p.substr(p.size() - 4) == ".dds") return readDds(path);
+    int w = 0, h = 0, n = 0;
+    stbi_uc* pixels = stbi_load(path.c_str(), &w, &h, &n, 4);
+    if (!pixels) throw runtime_error("not DDS and image decode failed: " + path);
+    Dds d{}; d.w = w; d.h = h; d.mips = 1; d.fmt = 4;
+    d.srgb = !linearTextureName(hint.empty() ? path : hint);
+    d.data.assign(pixels, pixels + (size_t)w * h * 4);
+    stbi_image_free(pixels);
     return d;
 }
 
@@ -362,9 +438,8 @@ static int convertEff(const string& dir, const string& catDir, const string& out
             partMesh[s] = effKey(ini, s, "mesh"); partMat[s] = effKey(ini, s, "material");
         } else if (s.rfind("Replace", 0) == 0) {
             replaceKeys.push_back(s);
-            auto h = effKey(ini, s, "handling");
             auto ta = effKey(ini, s, "target.asset");
-            if (h != "skip" && !ta.empty()) targetMeshes.insert(ta);
+            if (!ta.empty()) targetMeshes.insert(ta);
         }
     }
     auto cat = loadCatalogByMeshes(catDir, targetMeshes);
@@ -379,7 +454,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
         string original;
         if (!effCatalogTexture(cat, asset, original)) return -1;
         Dds d;
-        try { d = readDds(ddsPath); } catch (exception& e) { cerr << "texture skip " << asset << ": " << e.what() << "\n"; return -1; }
+        try { d = readTexture(ddsPath, asset); } catch (exception& e) { cerr << "texture skip " << asset << ": " << e.what() << "\n"; return -1; }
         int pid = addPayload(d.data);
         cJSON* t = obj(nullptr);
         cJSON_AddNumberToObject(t, "width", d.w); cJSON_AddNumberToObject(t, "height", d.h);
@@ -393,10 +468,18 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     map<int,int> meshIndex;
     map<int,int> cidToMesh;
     // 先决定目标/部件，再逐个目标合并
+    set<int> hiddenTargets;
+    set<int> keptTargets;
     for (auto& rkey : replaceKeys) {
-        if (effKey(ini, rkey, "handling") == "skip") continue;
+        const string handling = effKey(ini, rkey, "handling");
         string targetAsset = effKey(ini, rkey, "target.asset");
         int cid = effCid(cat, targetAsset);
+        if (handling == "hide" || handling == "keep") {
+            if (cid < 0) { cout << "skip " << handling << " " << rkey << ": no catalog component for " << targetAsset << "\n"; continue; }
+            if (handling == "hide") hiddenTargets.insert(cid); else keptTargets.insert(cid);
+            continue;
+        }
+        if (handling == "skip") continue;
         if (cid < 0) { cout << "skip replace " << rkey << ": no catalog component for " << targetAsset << "\n"; continue; }
         auto parts = effSplit(effKey(ini, rkey, "parts"), ',');
         if (parts.empty()) { cout << "skip replace " << rkey << ": no parts\n"; continue; }
@@ -530,8 +613,9 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     for (int cid : cat.ids) {
         cJSON* x = obj(nullptr); cJSON_AddNumberToObject(x,"target",cid);
         auto it = cidToMesh.find(cid);
-        if (it == cidToMesh.end()) cJSON_AddStringToObject(x,"operation","keep");
-        else { cJSON_AddStringToObject(x,"operation","replace"); cJSON_AddNumberToObject(x,"mesh",it->second); }
+        if (it != cidToMesh.end()) { cJSON_AddStringToObject(x,"operation","replace"); cJSON_AddNumberToObject(x,"mesh",it->second); }
+        else if (hiddenTargets.count(cid)) cJSON_AddStringToObject(x,"operation","hide");
+        else cJSON_AddStringToObject(x,"operation","keep");
         jadd(jac,x);
     }
     cJSON_AddItemToObject(japp,"components",jac); jadd(japps,japp);
@@ -845,7 +929,7 @@ static int convertLegacyProfile(const string& dir, const string& catDir, const s
     vector<int> textureIds;
     for (auto& t : profileTex) {
         try {
-            Dds d = readDds(dir + "/" + t.dds);
+            Dds d = readTexture(dir + "/" + t.dds, t.name);
             int pid = addPayload(d.data);
             cJSON* x = obj(nullptr);
             cJSON_AddNumberToObject(x, "width", d.w); cJSON_AddNumberToObject(x, "height", d.h);
@@ -1054,7 +1138,7 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             auto hs = ini.sec["TextureOverride_Texture" + to_string(n)].find("hash");
             if (hs == ini.sec["TextureOverride_Texture" + to_string(n)].end()) continue;
             auto tn = texName.find(lower(hs->second)); if (tn == texName.end()) continue;
-            try { texRes[n] = {tn->second, readDds(dir + "/" + it->second)}; }
+            try { texRes[n] = {tn->second, readTexture(dir + "/" + it->second, tn->second)}; }
             catch (exception& e) { cerr << "texture skip " << it->second << ": " << e.what() << "\n"; }
         }
         cout << "textures: " << texRes.size() << " matched\n";
@@ -1090,7 +1174,7 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             };
             int s0, s1, s2, sib; vector<uint8_t> vb0, vb1, vb2, ib;
             rd(nvb0, s0, vb0); rd(nvb1, s1, vb1); rd(nvb2, s2, vb2); rd(nib, sib, ib);
-            if (s2 != 16 && s2 != 8 && s2 != 12) { cout << "skip comp " << mid << ": VB2 stride " << s2 << "\n"; continue; }
+            if (s2 != 4 && s2 != 8 && s2 != 12 && s2 != 16 && s2 != 24) { cout << "skip comp " << mid << ": VB2 stride " << s2 << "\n"; continue; }
             int nv = (int)vb0.size() / s0;
             if ((int)vb2.size() != nv * s2 || (int)vb1.size() != nv * s1) { cout << "skip comp " << mid << ": buffer mismatch\n"; continue; }
             int ni = (int)ib.size() / 2;
@@ -1099,18 +1183,41 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             vector<cJSON*> jbones;
             map<pair<int,int>, int> pal;
             bool ok = true;
+            string skinError;
             for (int v = 0; v < nv && ok; v++) {
                 uint16_t w[4] = {0,0,0,0}, gi[4] = {0,0,0,0};
-                if (s2 == 16) for (int k = 0; k < 4; k++) {
-                    w[k] = (uint16_t)(vb2[v*16 + k*2] | (vb2[v*16 + k*2 + 1] << 8));
-                    gi[k] = (uint16_t)(vb2[v*16 + 8 + k*2] | (vb2[v*16 + 8 + k*2 + 1] << 8));
+                if (s2 == 16) {
+                    // 合并骨架：4×UNORM16 权重 + 4×UINT16 全局骨骼 id
+                    for (int k = 0; k < 4; k++) {
+                        w[k] = (uint16_t)(vb2[v*16 + k*2] | (vb2[v*16 + k*2 + 1] << 8));
+                        gi[k] = (uint16_t)(vb2[v*16 + 8 + k*2] | (vb2[v*16 + 8 + k*2 + 1] << 8));
+                    }
                 } else if (s2 == 12) {
                     // 旧 EFMI ALPHA：u16 权重 + u8 组件本地骨骼索引
                     for (int k = 0; k < 4; k++) w[k] = (uint16_t)(vb2[v*12 + k*2] | (vb2[v*12 + k*2 + 1] << 8));
                     for (int k = 0; k < 4; k++) gi[k] = vb2[v*12 + 8 + k];
-                } else {
+                } else if (s2 == 24) {
+                    // 4×FLOAT32 权重 + 4×UINT16 全局骨骼 id；权重先归一化再量化到 UNORM16。
+                    float f[4];
+                    memcpy(f, &vb2[v*24], 16);
+                    float sum = 0;
+                    for (int k = 0; k < 4; k++) {
+                        if (!std::isfinite(f[k]) || f[k] < 0) f[k] = 0;
+                        sum += f[k];
+                    }
+                    if (sum <= 1e-6f) { cout << "skip comp " << mid << ": zero skin weights\n"; ok = false; break; }
+                    for (int k = 0; k < 4; k++) {
+                        w[k] = (uint16_t)std::lround(std::min(1.0f, f[k] / sum) * 65535.0f);
+                        gi[k] = (uint16_t)(vb2[v*24 + 16 + k*2] | (vb2[v*24 + 16 + k*2 + 1] << 8));
+                    }
+                } else if (s2 == 8) {
+                    // Playbook：4×UINT16 全局骨骼 id 的刚性布局；首个 id 生效。
+                    for (int k = 0; k < 4; k++) gi[k] = (uint16_t)(vb2[v*8 + k*2] | (vb2[v*8 + k*2 + 1] << 8));
                     w[0] = 65535;
-                    gi[0] = (uint16_t)(vb2[v*8] | (vb2[v*8 + 1] << 8));
+                } else {
+                    // stride 4：2×UINT16，首个是骨骼 id，其余为填充；刚性绑定。
+                    gi[0] = (uint16_t)(vb2[v*4] | (vb2[v*4 + 1] << 8));
+                    w[0] = 65535;
                 }
                 uint8_t outIdx[4] = {0,0,0,0};
                 for (int k = 0; k < 4; k++) {
@@ -1119,13 +1226,23 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
                     if (s2 == 12) {
                         owner = cid; local = (int)gi[k];
                         auto* cc = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
-                        if (local >= cJSON_GetArraySize(get(cc, "bone_names"))) { ok = false; break; }
-                    } else if (!ownerOf(gi[k], owner, local)) { ok = false; break; }
+                        if (local >= cJSON_GetArraySize(get(cc, "bone_names"))) {
+                            skinError = "local bone " + to_string(local) + " >= target bones " +
+                                to_string(cJSON_GetArraySize(get(cc, "bone_names")));
+                            ok = false; break;
+                        }
+                    } else if (!ownerOf(gi[k], owner, local)) {
+                        skinError = "global bone id " + to_string(gi[k]) + " is not in the merged target skeleton";
+                        ok = false; break;
+                    }
                     auto key = make_pair(owner, local);
                     auto it = pal.find(key);
                     int pi;
                     if (it == pal.end()) {
-                        pi = (int)pal.size(); if (pi > 255) { ok = false; break; }
+                        pi = (int)pal.size(); if (pi > 255) {
+                            skinError = "bone palette exceeds 256 slots";
+                            ok = false; break;
+                        }
                         pal[key] = pi;
                         auto* ownerComp = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(owner).c_str());
                         auto* bn = get(ownerComp, "bone_names");
@@ -1140,7 +1257,7 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
                 for (int k = 0; k < 4; k++) { skin[v*12 + k*2] = w[k] & 255; skin[v*12 + k*2 + 1] = w[k] >> 8; }
                 memcpy(&skin[v*12 + 8], outIdx, 4);
             }
-            if (!ok) { cout << "skip comp " << mid << ": palette/global index\n"; continue; }
+            if (!ok) { cout << "skip comp " << mid << ": " << (skinError.empty() ? "palette/global index" : skinError) << "\n"; continue; }
 
             // attributes: catalog 4-tuples -> 5-tuples
             auto* comp = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());

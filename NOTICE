@@ -6,3 +6,13 @@ cJSON (src/third_party/cJSON.{c,h})
 
 BEN catalog data is NOT bundled. It is supplied by the user and remains
 AGPL-3.0-only, Copyright Dr-hydra / Better Endfield contributors.
+
+bcdec.h (src/third_party/bcdec.h)
+  Copyright (c) 2022 Sergii "iOrange" Kudlai
+  MIT License — see the header of bcdec.h for the full text.
+  Used to expand BC2 (DXT3) textures to RGBA32 because BEM does not accept BC2.
+
+stb_image.h (src/third_party/stb_image.h)
+  Copyright (c) 2017 Sean Barrett
+  MIT License / public domain (dual) — see the header of stb_image.h.
+  Used to decode TGA/PNG/JPG source textures to RGBA32.
