@@ -15,8 +15,8 @@
 | EFMI | 选项/热键/多外观 | ❌ | 目前固定单外观；BEM 1.1 option_groups 尚未映射 |
 | EFF | Format 3（`EFF_AUTHOR_FILE3` v3, kind=1） | ✅ | Replace/Part/Mesh/Material/Texture |
 | EFF | `handling=replace/keep/skip/hide` | ✅ | hide → BEM `operation: hide`，skip/keep → `keep` |
-| EFF | `.effres` kind=2 材质参数/颜色/关键字 | ✅ | 解析 `float.*` / `value4.*` / `keyword.*`，输出 BEM 1.5 `draws[].material_overrides`（含 `material-overrides-v1`） |
-| EFF | `render_queue` / 渲染状态 | 🟡 | 已解析但暂未写入 BEM（需上游 per-draw render state 字段合并后映射） |
+| EFF | `.effres` kind=2 材质参数/颜色/关键字 | ✅ | 解析 `float.*` / `value4.*` / `keyword.*` / `render_queue`，输出 BEM 1.5 `draws[].material_overrides` |
+| EFF | `render_queue` / 渲染状态 | ✅ | 输出 BEM 1.5 `material_overrides.render_queue` + `material-render-state-v1`（shader_passes 暂无来源） |
 | EFF | 物理/特效/blendshape/LOD | ❌ | 不是 BEM 1.0 可表达范围，需明确声明不支持 |
 | EFF | 运行期骨骼重定向 Compute Shader | ❌ | 跨 IB 绘制依赖它；删掉会错绑 |
 | EFF/EFMI | 非 catalog 的自定义贴图/材质 | ❌ | 需要 donor 或 catalog 材质表；当前跳过并报错 |

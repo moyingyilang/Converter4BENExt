@@ -560,6 +560,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     cJSON* jmeshes = jarr();
     map<int,int> meshIndex;
     bool hasMatOverrides = false;
+    bool hasRenderState = false;
     map<int,int> cidToMesh;
     // 先决定目标/部件，再逐个目标合并
     set<int> hiddenTargets;
@@ -681,6 +682,11 @@ static int convertEff(const string& dir, const string& catDir, const string& out
                     cJSON* arr = jarr(); for (auto& k : md.disableKeywords) jadd(arr, jstrv(k));
                     cJSON_AddItemToObject(mo, "disable_keywords", arr); any = true;
                 }
+                if (md.renderQueue >= -1 && md.renderQueue <= 5000) {
+                    cJSON_AddNumberToObject(mo, "render_queue", md.renderQueue);
+                    any = true;
+                    hasRenderState = true;
+                }
                 if (any) { cJSON_AddItemToObject(jd, "material_overrides", mo); hasMatOverrides = true; }
                 else cJSON_Delete(mo);
             }
@@ -757,6 +763,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     cJSON_AddStringToObject(mroot,"version","0.1.0");
     cJSON* caps = jarr(); for (auto s : {"native-materials","palette-u8","indices-u32","fixed-appearances"}) jadd(caps,jstrv(s));
     if (hasMatOverrides) jadd(caps,jstrv("material-overrides-v1"));
+    if (hasRenderState) jadd(caps,jstrv("material-render-state-v1"));
     cJSON_AddItemToObject(mroot,"required_capabilities",caps);
     cJSON_AddItemToObject(mroot,"target",jtarget);
     cJSON_AddItemToObject(mroot,"meshes",jmeshes);
