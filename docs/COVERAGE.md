@@ -32,7 +32,8 @@
 | DDS RGBA8 / BGRA8（DXGI 28/87） | ✅ | RGBA32（BGRA 自动换序） |
 | DDS BC6H | ❌ | HDR 无法无损装进 8-bit RGBA32；明确拒绝 |
 | TGA / PNG / JPG | ✅ | RGBA32，mips=1；sRGB 由槽位/文件名推断 |
-| 自定义贴图（catalog 无身份） | 🟡 | `--texture-fingerprint` 可按 catalog descriptor（宽/高/mip）唯一匹配；多候选则跳过；legacy profile 路径同样生效 |
+| 自定义贴图（catalog 无身份） | 🟡 | `--texture-fingerprint` 可按 catalog descriptor（宽/高/mip）唯一匹配；多候选则跳过；EFMI legacy 与 EFF 路径都生效 |
+| DDS cubemap / volume / texture array | ❌ | 明确拒绝（BEM 2D 无法表达），不再静默当 2D 读 |
 
 ## 3. 当前样本覆盖（`tests/coverage.sh`，输出经 `be-bem validate`）
 

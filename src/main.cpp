@@ -102,9 +102,18 @@ static Dds readDds(const string& path) {
     auto b = readFile(path);
     if (b.size() < 128 || memcmp(b.data(), "DDS ", 4)) throw runtime_error("not DDS: " + path);
     Dds d{}; d.h = rd32(b, 12); d.w = rd32(b, 16); d.mips = rd32(b, 28); if (d.mips <= 0) d.mips = 1;
+    const uint32_t caps2 = rd32(b, 116);
+    if (caps2 & 0x200u) throw runtime_error("DDS cubemap is not representable as BEM 2D texture: " + path);
+    if (rd32(b, 24) > 1) throw runtime_error("DDS volume texture is not representable as BEM 2D texture: " + path);
     string fourcc((char*)b.data() + 84, 4);
     size_t off = 128; int code = -1;
-    if (fourcc == "DX10") { code = rd32(b, 128); off = 148; }
+    if (fourcc == "DX10") {
+        code = rd32(b, 128); off = 148;
+        const uint32_t dimension = rd32(b, 132), misc = rd32(b, 136), arraySize = rd32(b, 140);
+        if (dimension == 4) throw runtime_error("DDS volume texture is not representable as BEM 2D texture: " + path);
+        if (dimension == 5) throw runtime_error("DDS cubemap is not representable as BEM 2D texture: " + path);
+        if (arraySize > 1 || (misc & 0x4u)) throw runtime_error("DDS texture array is not representable as BEM 2D texture: " + path);
+    }
     else if (fourcc == "DXT1") code = 71; else if (fourcc == "DXT5") code = 77;
     else if (fourcc == "DXT3") code = 74;
     else if (fourcc == "ATI1" || fourcc == "BC4U") code = 80; else if (fourcc == "ATI2" || fourcc == "BC5U") code = 83;
@@ -585,10 +594,15 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     map<string,int> texIndex; // original_name -> textures[] index
     auto addTexture = [&](const string& asset, const string& ddsPath) -> int {
         auto it = texIndex.find(asset); if (it != texIndex.end()) return it->second;
-        string original;
-        if (!effCatalogTexture(cat, asset, original)) return -1;
         Dds d;
         try { d = readTexture(ddsPath, asset); } catch (exception& e) { cerr << "texture skip " << asset << ": " << e.what() << "\n"; return -1; }
+        string original;
+        if (!effCatalogTexture(cat, asset, original)) {
+            if (!g_textureFingerprint) { cerr << "texture skip " << asset << ": no catalog identity\n"; return -1; }
+            original = catalogTextureByDescriptor(cat.textures, d.w, d.h, d.mips);
+            if (original.empty()) { cerr << "texture skip " << asset << ": no unique descriptor match\n"; return -1; }
+            cout << "texture fingerprint: " << asset << " -> " << original << "\n";
+        }
         int pid = addPayload(d.data);
         cJSON* t = obj(nullptr);
         cJSON_AddNumberToObject(t, "width", d.w); cJSON_AddNumberToObject(t, "height", d.h);
