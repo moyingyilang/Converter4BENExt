@@ -25,8 +25,33 @@
 
 using namespace std;
 static bool g_textureFingerprint = false;
+// 显式开启的旧布局兼容：源 VB 缺少目标尾部顶点属性时补零，而不是直接拒绝。
+// 只允许 source stride < target stride；不做删除/重排，避免静默猜布局。
+static bool g_compatLayout = false;
+// 显式开启的旧全局骨骼兼容：源组件使用的全局 bone id 数量与目标组件 bone_names
+// 数量一致时，按 source id 数值序 -> target bone_names 顺序做排名映射。
+static bool g_compatBones = false;
+// 外部 global skeleton 表：global bone id -> bone name（avtos TSV）。
+static map<int, string> g_skeleton;
 static string g_forceCharacter;
 static cJSON* g_identities = nullptr;
+static void loadSkeletonTable(const string& path) {
+    ifstream f(path);
+    if (!f) throw runtime_error("cannot open skeleton table: " + path);
+    string line;
+    while (getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        vector<string> cols; size_t a = 0;
+        while (a <= line.size()) {
+            size_t b = line.find('\t', a);
+            if (b == string::npos) b = line.size();
+            cols.push_back(line.substr(a, b - a)); a = b + 1;
+        }
+        if (cols.size() < 4) continue;
+        try { g_skeleton[stoi(cols[0])] = cols.back(); } catch (...) {}
+    }
+    cerr << "skeleton: loaded " << g_skeleton.size() << " global bones from " << path << "\n";
+}
 namespace fs = std::filesystem;
 
 struct Ini {
@@ -1214,7 +1239,30 @@ static int convertLegacyProfile(const string& dir, const string& catDir, const s
         }
         cJSON* sx = jarr(); jadd(sx,jnum(12)); jadd(sx,jnum(4)); jadd(sx,jnum(4)); jadd(sx,jnum(2)); jadd(sx,jnum(0)); jadd(jattrs,sx);
         sx = jarr(); jadd(sx,jnum(13)); jadd(sx,jnum(6)); jadd(sx,jnum(4)); jadd(sx,jnum(2)); jadd(sx,jnum(8)); jadd(jattrs,sx);
-        if (astrides[0] != s0 || astrides[1] != s1) { cout << "skip comp " << mid << ": target attrs " << astrides[0] << "/" << astrides[1] << " != source " << s0 << "/" << s1 << "\n"; continue; }
+        if (astrides[0] != s0 || astrides[1] != s1) {
+            if (!g_compatLayout) {
+                cout << "skip comp " << mid << ": target attrs " << astrides[0] << "/" << astrides[1]
+                     << " != source " << s0 << "/" << s1 << " (add --compat-layout to pad trailing gaps)\n";
+                continue;
+            }
+            auto padStream = [&](vector<uint8_t>& vb, int& stride, int targetStride, int stream) {
+                if (stride == targetStride) return true;
+                if (stride > targetStride) {
+                    cout << "skip comp " << mid << ": compat-layout refuses shrinking stream" << stream
+                         << " " << stride << " -> " << targetStride << "\n";
+                    return false;
+                }
+                vector<uint8_t> out((size_t)nv * targetStride, 0);
+                for (int v = 0; v < nv; v++)
+                    memcpy(&out[(size_t)v * targetStride], &vb[(size_t)v * stride], stride);
+                vb.swap(out);
+                cout << "compat-layout comp " << mid << ": stream" << stream << " "
+                     << stride << " -> " << targetStride << " (zero-fill trailing)\n";
+                stride = targetStride;
+                return true;
+            };
+            if (!padStream(vb0, s0, astrides[0], 0) || !padStream(vb1, s1, astrides[1], 1)) continue;
+        }
 
         int targetBones = cJSON_GetArraySize(get(comp, "bone_names"));
         // Decode the source skin layout into (u16 weight, source bone id) pairs.
@@ -1250,6 +1298,23 @@ static int convertLegacyProfile(const string& dir, const string& catDir, const s
         uint16_t tw[4], tgi[4];
         for (int v = 0; v < nv; v++) { decodeSkin(v, tw, tgi); }
 
+        // --compat-bones：源是全局骨骼 id，但目标 catalog 只给组件局部 bone_names。
+        // 仅当「源实际使用的 unique bone id 数」恰好等于目标 bone 数时，按数值序做排名映射。
+        set<int> usedIds;
+        for (int v = 0; v < nv; v++) {
+            uint16_t w[4], gi[4]; decodeSkin(v, w, gi);
+            for (int k = 0; k < 4; k++) if (w[k]) usedIds.insert((int)gi[k]);
+        }
+        vector<int> usedVec(usedIds.begin(), usedIds.end());
+        bool rankBones = g_compatBones && (int)usedVec.size() == targetBones;
+        // stride12 是 u8 本地骨骼索引：源骨骼范围不超过目标组件骨骼数时，允许显式直映。
+        bool directLocal = g_compatBones && s2 == 12 && srcBones <= targetBones;
+        if (directLocal) cout << "compat-bones comp " << mid << ": direct local 0.." << (srcBones - 1)
+                              << " -> target 0.." << (srcBones - 1) << "\n";
+        if (g_compatBones && !rankBones && (int)usedVec.size() != targetBones && !directLocal)
+            cout << "compat-bones comp " << mid << ": used " << usedVec.size()
+                 << " != target " << targetBones << " (skip rank mapping)\n";
+
         vector<uint8_t> skin(nv*12);
         vector<cJSON*> bones; map<pair<int,int>,int> pal; bool ok = true; string fail;
         for (int v = 0; v < nv && ok; v++) {
@@ -1260,6 +1325,25 @@ static int convertLegacyProfile(const string& dir, const string& catDir, const s
                 pair<int,int> tgt;
                 auto it = boneMap.find({mid, (int)gi[k]});
                 if (it != boneMap.end()) tgt = it->second;
+                else if (rankBones) {
+                    auto rit = lower_bound(usedVec.begin(), usedVec.end(), (int)gi[k]);
+                    if (rit != usedVec.end() && *rit == (int)gi[k])
+                        tgt = {cid, (int)(rit - usedVec.begin())};
+                    else { fail = "bone " + to_string(gi[k]) + " not in used set"; ok = false; break; }
+                }
+                else if (directLocal) tgt = {cid, (int)gi[k]};
+                else if (!g_skeleton.empty() && (s2 == 16 || s2 == 8 || s2 == 4)) {
+                    auto sit = g_skeleton.find((int)gi[k]);
+                    if (sit == g_skeleton.end()) { fail = "bone " + to_string(gi[k]) + " not in skeleton table"; ok = false; break; }
+                    bool found = false;
+                    auto* bn = get(cat.comps, to_string(cid).c_str());
+                    bn = bn ? get(bn, "bone_names") : nullptr;
+                    for (int bi = 0; bn && bi < cJSON_GetArraySize(bn); bi++) {
+                        auto* nm = cJSON_GetArrayItem(bn, bi);
+                        if (cJSON_IsString(nm) && sit->second == nm->valuestring) { tgt = {cid, bi}; found = true; break; }
+                    }
+                    if (!found) { fail = "bone " + sit->second + " not in target component"; ok = false; break; }
+                }
                 else if (srcBones == targetBones) tgt = {cid, (int)gi[k]};
                 else { fail = "bone " + to_string(gi[k]) + " unmapped (src bones " + to_string(srcBones) + " vs target " + to_string(targetBones) + ")"; ok = false; break; }
                 auto pit = pal.find(tgt);
@@ -1809,7 +1893,7 @@ int main(int argc, char** argv) {
             if (dir.empty() || catDir.empty()) { cerr << "missing mod/catalog\n"; return 2; }
             return legacyInspect(dir, catDir, character, outPath);
         }
-        string dir, catDir, out, profile, character;
+        string dir, catDir, out, profile, character, skeletonPath;
         bool allowReview = false, legacyAuto = false;
         for (int i = 2; i < argc; i++) {
             string a = argv[i];
@@ -1820,6 +1904,9 @@ int main(int argc, char** argv) {
             else if (a == "--allow-review") allowReview = true;
             else if (a == "--legacy-auto") legacyAuto = true;
             else if (a == "--texture-fingerprint") g_textureFingerprint = true;
+            else if (a == "--compat-layout") g_compatLayout = true;
+            else if (a == "--compat-bones") g_compatBones = true;
+            else if (a == "--skeleton" && i + 1 < argc) skeletonPath = argv[++i];
             else if (a == "--identities" && i + 1 < argc) {
                 auto bytes = readFile(argv[++i]);
                 g_identities = cJSON_ParseWithLength((const char*)bytes.data(), bytes.size());
@@ -1828,6 +1915,8 @@ int main(int argc, char** argv) {
             else dir = a;
         }
         if (dir.empty() || catDir.empty() || out.empty()) { cerr << "missing args\n"; return 2; }
+        if (!skeletonPath.empty()) loadSkeletonTable(skeletonPath);
+        if (!character.empty()) g_forceCharacter = character;
         if (!profile.empty()) return convertLegacyProfile(dir, catDir, profile, out, allowReview);
         if (legacyAuto && !character.empty()) {
             try { return convertEfmi(dir, catDir, out); }

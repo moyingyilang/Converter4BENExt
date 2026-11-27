@@ -78,7 +78,7 @@ make            # -> build/c4ben
 3. `--allow-review` 只用于测试草稿，不要拿去直接分发
 
 当前实测：zhuangfangyi 的 11 个旧组件中，2 个能按 profile 转出（comp6→hair、comp9→face），
-其余因目标顶点布局 stride 不一致被拒绝；这是**预期行为**，不静默猜布局。
+其余因目标顶点布局 stride 不一致，默认拒绝；显式加 `--compat-layout` 时仅对 **source stride < target stride** 做尾部零填充（不删除/不重排，source 更大仍拒绝）。
 
 ## 已知限制
 
