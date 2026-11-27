@@ -1394,6 +1394,35 @@ static int applyIdentities(Cat& cat) {
     return applied;
 }
 
+// EFMI option surfaces (KeySwap/KeyToggle) are detected but not yet mapped to
+// BEM 1.1 option_groups. Report them instead of silently collapsing to one state.
+static vector<pair<string, vector<int>>> detectEfmiOptions(const Ini& ini) {
+    vector<pair<string, vector<int>>> groups;
+    for (auto& s : ini.order) {
+        if (s.rfind("KeySwap", 0) != 0 && s.rfind("KeyToggle", 0) != 0) continue;
+        auto section = ini.sec.find(s);
+        if (section == ini.sec.end()) continue;
+        auto it = section->second.find("key");
+        if (it == section->second.end()) continue;
+        // cycle sections declare the variable and its values on a line like
+        //   $swapkey1 = 0, 1, 2
+        string variable, values;
+        for (auto& kv : section->second) {
+            if (kv.first.rfind("$", 0) == 0 && kv.first.find("swap") != string::npos) { variable = kv.first; values = kv.second; break; }
+        }
+        if (variable.empty()) continue;
+        vector<int> choices;
+        string cur;
+        for (char c : values + ",") {
+            if (c == ',') { if (!cur.empty()) choices.push_back(atoi(cur.c_str())); cur.clear(); }
+            else if (!isspace((unsigned char)c)) cur += c;
+        }
+        if (choices.empty()) choices.push_back(0);
+        groups.push_back({variable, choices});
+    }
+    return groups;
+}
+
 static int convertEfmi(const string& dir, const string& catDir, const string& out) {
         auto ini = Ini::parse(dir + "/mod.ini");
         if (effKey(ini, "Mod", "format") == "3") return convertEff(dir, catDir, out);
@@ -1401,6 +1430,15 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
         for (auto& section : ini.order) if (effiComponentMid(section) >= 0) ++componentEntries;
         if (componentEntries == 0)
             throw runtime_error("not an EFMI model package (no TextureOverride_Component entry points)");
+        auto optionGroups = detectEfmiOptions(ini);
+        if (!optionGroups.empty()) {
+            cout << "options detected: " << optionGroups.size() << " groups (BEM option_groups mapping not implemented yet)\n";
+            for (auto& g : optionGroups) {
+                cout << "  " << g.first << ":";
+                for (int v : g.second) cout << " " << v;
+                cout << "\n";
+            }
+        }
         vector<string> hashes;
         for (auto& s : ini.order) {
             if (effiComponentMid(s) < 0) continue;

@@ -87,7 +87,7 @@ make            # -> build/c4ben
 - EFF `.effres` kind=2 已解析 float/color/keyword 并输出 BEM 1.5 `material_overrides`；`render_queue`/渲染状态暂未写入。
 - EFF 辅助骨骼用祖先替代，会损失飘带/裙摆的二级摆动。
 - EFF 的 blendshape、物理、特效、LOD 不转。
-- EFMI 支持标准 ComponentN 的 skin stride 4/8/12/16/24（8/4/24 为 L3 推断，见 docs/COVERAGE.md）；EFMI 选项/热键/多外观还没有映射到 BEM option_groups。
+- EFMI 支持标准 ComponentN 的 skin stride 4/8/12/16/24（8/4/24 为 L3 推断，见 docs/COVERAGE.md）；EFMI 选项/热键/多外观会检测并打印（KeySwap/KeyToggle），但还没有映射到 BEM option_groups。
 - 合并不住的组件会 `keep`，不猜；catalog 缺 hash 的包不输出，或走 `inspect-legacy` 兼容层。
 - 旧版 catalog/资源缺失时无法自动完成身份锚定（样本：庄方宜旧包）；EFMI ALPHA-5 包可用 `--legacy-auto --texture-fingerprint` 恢复几何+贴图。
 - 非模型包（GUI/HUD）会明确报错，不再误报 catalog 不匹配。

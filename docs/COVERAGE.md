@@ -12,7 +12,7 @@
 | EFMI | 刚性 skin stride **4** | ✅（L3 推断） | 首个 UINT16 为全局骨骼 id，其余为填充 |
 | EFMI | 浮点权重 skin stride **24** | ✅（L3 推断） | 4×FLOAT32 权重（归一化后量化）+ 4×UINT16 全局 id；样本：伊冯 comp10 |
 | EFMI | 旧版 hash 不匹配当前 catalog | ✅ | `inspect-legacy` + `--profile`，或一键 `convert --character <chr> --legacy-auto`（自动生成 draft profile 并转换）；仅旧 mod 无法可靠映射时仍会拒绝 |
-| EFMI | 选项/热键/多外观 | ❌ | 目前固定单外观；BEM 1.1 option_groups 尚未映射 |
+| EFMI | 选项/热键/多外观 | 🟡 | 已检测 `KeySwap`/`KeyToggle` 并打印组/选项（样本 SI V1.0：5 组）；BEM 1.1 option_groups 尚未映射，转换仍是固定单外观 |
 | EFMI | 新贴图段名 `Resource_Texture_<hash>` + `TextureOverride_Texture_<hash>` | ✅ | 旧 `TextureNNN` 与新 hash 命名都支持（样本 SI V1.0：贴图 0→31） |
 | EFF | Format 3（`EFF_AUTHOR_FILE3` v3, kind=1） | ✅ | Replace/Part/Mesh/Material/Texture |
 | EFF | `handling=replace/keep/skip/hide` | ✅ | hide → BEM `operation: hide`，skip/keep → `keep` |
