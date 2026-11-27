@@ -11,7 +11,7 @@
 | EFMI | 合并骨架，skin stride **8** | ✅（L3 推断） | Playbook：4×UINT16 全局 id 的刚性布局，取首个 id；其余 id 仅校验 |
 | EFMI | 刚性 skin stride **4** | ✅（L3 推断） | 首个 UINT16 为全局骨骼 id，其余为填充 |
 | EFMI | 浮点权重 skin stride **24** | ✅（L3 推断） | 4×FLOAT32 权重（归一化后量化）+ 4×UINT16 全局 id；样本：伊冯 comp10 |
-| EFMI | 旧版 hash 不匹配当前 catalog | 🟡 | 走 `inspect-legacy` + `--profile mapping.json`；只有旧 mod 时无法可靠映射（需旧 catalog/资源） |
+| EFMI | 旧版 hash 不匹配当前 catalog | ✅ | `inspect-legacy` + `--profile`，或一键 `convert --character <chr> --legacy-auto`（自动生成 draft profile 并转换）；仅旧 mod 无法可靠映射时仍会拒绝 |
 | EFMI | 选项/热键/多外观 | ❌ | 目前固定单外观；BEM 1.1 option_groups 尚未映射 |
 | EFF | Format 3（`EFF_AUTHOR_FILE3` v3, kind=1） | ✅ | Replace/Part/Mesh/Material/Texture |
 | EFF | `handling=replace/keep/skip/hide` | ✅ | hide → BEM `operation: hide`，skip/keep → `keep` |
@@ -51,7 +51,7 @@
 
 | 样本 | 类型 | 结果 | 说明 |
 |---|---|---|---|
-| FemaleEndminThiccMod | EFMI ALPHA-5 | FAIL（可用 profile） | 旧 hash 不匹配；`inspect-legacy --character chr_0003_endminf` 可生成 8 组件映射并转换成功 |
+| FemaleEndminThiccMod | EFMI ALPHA-5 | OK（legacy-auto，10 meshes） | 旧 hash 不匹配；`--character chr_0003_endminf --legacy-auto` 自动生成 profile 并转换（遗留 1 个单骨骼组件因源骨骼数 4>目标 1 拒绝） |
 | SI V1.0 | EFMI | OK（14 meshes） | 修复 `Resource_Texture_<hash>` 段名解析后通过 |
 | Fluorite OG GUI / Avywenna OG GUI | EFMI | OK | 模型包带 GUI |
 | Liino VELMORA / Ardelia SR / yif / kay Graffiti Girl | EFMI | OK | 含 keep 组件 |

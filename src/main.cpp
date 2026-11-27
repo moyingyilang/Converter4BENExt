@@ -1092,8 +1092,9 @@ static int convertLegacyProfile(const string& dir, const string& catDir, const s
         rd(nvb0,s0,vb0); rd(nvb1,s1,vb1); rd(nvb2,s2,vb2); rd(nib,sib,ib);
         if (s0 <= 0 || s1 <= 0) { cout << "skip comp " << mid << ": bad stride\n"; continue; }
         int nv = (int)vb0.size()/s0;
-        if ((int)vb1.size()/s1 != nv || s2 != 12) { cout << "skip comp " << mid << ": legacy skin requires stride12 (got " << s2 << ")\n"; continue; }
-        if ((int)vb2.size() != nv*12) { cout << "skip comp " << mid << ": VB2 size mismatch\n"; continue; }
+        if ((int)vb1.size()/s1 != nv) { cout << "skip comp " << mid << ": VB1 size mismatch\n"; continue; }
+        if (s2 != 4 && s2 != 8 && s2 != 12 && s2 != 16 && s2 != 24) { cout << "skip comp " << mid << ": legacy skin stride " << s2 << "\n"; continue; }
+        if ((int)vb2.size() != nv*s2) { cout << "skip comp " << mid << ": VB2 size mismatch\n"; continue; }
         int ni = (int)ib.size()/2;
 
         auto* comp = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
@@ -1112,43 +1113,69 @@ static int convertLegacyProfile(const string& dir, const string& catDir, const s
         if (astrides[0] != s0 || astrides[1] != s1) { cout << "skip comp " << mid << ": target attrs " << astrides[0] << "/" << astrides[1] << " != source " << s0 << "/" << s1 << "\n"; continue; }
 
         int targetBones = cJSON_GetArraySize(get(comp, "bone_names"));
-        // 源组件本地骨骼数：从 VB2 里数最大值
-        int srcBones = 0; for (int v = 0; v < nv; v++) for (int k = 0; k < 4; k++) {
-            uint16_t w = (uint16_t)(vb2[v*12+k*2] | (vb2[v*12+k*2+1] << 8));
-            if (w) srcBones = std::max(srcBones, (int)vb2[v*12+8+k] + 1);
-        }
+        // Decode the source skin layout into (u16 weight, source bone id) pairs.
+        int srcBones = 0;
+        auto decodeSkin = [&](int v, uint16_t w[4], uint16_t gi[4]) {
+            if (s2 == 12) {
+                for (int k = 0; k < 4; k++) {
+                    w[k] = (uint16_t)(vb2[v*12 + k*2] | (vb2[v*12 + k*2 + 1] << 8));
+                    gi[k] = vb2[v*12 + 8 + k];
+                }
+            } else if (s2 == 16) {
+                for (int k = 0; k < 4; k++) {
+                    w[k] = (uint16_t)(vb2[v*16 + k*2] | (vb2[v*16 + k*2 + 1] << 8));
+                    gi[k] = (uint16_t)(vb2[v*16 + 8 + k*2] | (vb2[v*16 + 8 + k*2 + 1] << 8));
+                }
+            } else if (s2 == 24) {
+                float f[4]; memcpy(f, &vb2[v*24], 16);
+                float sum = 0; for (int k = 0; k < 4; k++) { if (!std::isfinite(f[k]) || f[k] < 0) f[k] = 0; sum += f[k]; }
+                if (sum <= 1e-6f) { for (int k = 0; k < 4; k++) { w[k] = 0; gi[k] = 0; } return; }
+                for (int k = 0; k < 4; k++) {
+                    w[k] = (uint16_t)std::lround(std::min(1.0f, f[k] / sum) * 65535.0f);
+                    gi[k] = (uint16_t)(vb2[v*24 + 16 + k*2] | (vb2[v*24 + 16 + k*2 + 1] << 8));
+                }
+            } else if (s2 == 8) {
+                for (int k = 0; k < 4; k++) gi[k] = (uint16_t)(vb2[v*8 + k*2] | (vb2[v*8 + k*2 + 1] << 8));
+                w[0] = 65535;
+            } else {
+                gi[0] = (uint16_t)(vb2[v*4] | (vb2[v*4 + 1] << 8));
+                w[0] = 65535;
+            }
+            for (int k = 0; k < 4; k++) if (w[k]) srcBones = std::max(srcBones, (int)gi[k] + 1);
+        };
+        uint16_t tw[4], tgi[4];
+        for (int v = 0; v < nv; v++) { decodeSkin(v, tw, tgi); }
+
         vector<uint8_t> skin(nv*12);
-        vector<cJSON*> bones; map<pair<int,int>,int> pal; bool ok = true;
+        vector<cJSON*> bones; map<pair<int,int>,int> pal; bool ok = true; string fail;
         for (int v = 0; v < nv && ok; v++) {
+            uint16_t w[4], gi[4]; decodeSkin(v, w, gi);
             uint8_t outIdx[4] = {0,0,0,0};
             for (int k = 0; k < 4; k++) {
-                uint16_t w = (uint16_t)(vb2[v*12+k*2] | (vb2[v*12+k*2+1] << 8));
-                uint8_t si = vb2[v*12+8+k];
-                if (!w) continue;
+                if (!w[k]) continue;
                 pair<int,int> tgt;
-                auto it = boneMap.find({mid, (int)si});
+                auto it = boneMap.find({mid, (int)gi[k]});
                 if (it != boneMap.end()) tgt = it->second;
-                else if (srcBones == targetBones) tgt = {cid, (int)si};
-                else { cout << "skip comp " << mid << ": bone " << (int)si << " unmapped and counts differ (" << srcBones << " vs " << targetBones << ")\n"; ok = false; break; }
-                auto key = tgt;
-                auto pit = pal.find(key);
+                else if (srcBones == targetBones) tgt = {cid, (int)gi[k]};
+                else { fail = "bone " + to_string(gi[k]) + " unmapped (src bones " + to_string(srcBones) + " vs target " + to_string(targetBones) + ")"; ok = false; break; }
+                auto pit = pal.find(tgt);
                 int pi;
                 if (pit == pal.end()) {
-                    pi = (int)pal.size(); if (pi > 255) { ok = false; break; }
-                    pal[key] = pi;
+                    pi = (int)pal.size(); if (pi > 255) { fail = "palette exceeds 256"; ok = false; break; }
+                    pal[tgt] = pi;
                     auto* tc = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(tgt.first).c_str());
                     auto* bn = get(tc, "bone_names"); auto* nm = cJSON_GetArrayItem(bn, tgt.second);
-                    if (!cJSON_IsString(nm)) { ok = false; break; }
+                    if (!cJSON_IsString(nm)) { fail = "target bone out of table"; ok = false; break; }
                     cJSON* b = obj(nullptr); cJSON_AddNumberToObject(b,"component",tgt.first); cJSON_AddNumberToObject(b,"index",tgt.second); cJSON_AddStringToObject(b,"name",nm->valuestring);
                     bones.push_back(b);
                 } else pi = pit->second;
                 outIdx[k] = (uint8_t)pi;
             }
             if (!ok) break;
-            for (int k = 0; k < 4; k++) { uint16_t w = (uint16_t)(vb2[v*12+k*2] | (vb2[v*12+k*2+1] << 8)); skin[v*12+k*2]=w&255; skin[v*12+k*2+1]=w>>8; }
+            for (int k = 0; k < 4; k++) { skin[v*12+k*2]=w[k]&255; skin[v*12+k*2+1]=w[k]>>8; }
             memcpy(&skin[v*12+8], outIdx, 4);
         }
-        if (!ok) continue;
+        if (!ok) { cout << "skip comp " << mid << ": " << fail << "\n"; continue; }
 
         int p0=addPayload(vb0), p1=addPayload(vb1), p2=addPayload(skin), pib=addPayload(ib);
         cJSON* jstreams = jarr();
@@ -1540,7 +1567,8 @@ int main(int argc, char** argv) {
     try {
         if (argc < 2 || (string(argv[1]) != "convert" && string(argv[1]) != "inspect-legacy" && string(argv[1]) != "map")) {
             cerr << "usage: c4ben convert <mod-dir> --catalog <catalog-dir> --out <out.bem>\n"
-                    "       c4ben inspect-legacy|map <old-mod-dir> --catalog <dir> --character <chr_...> [--out mapping.json]\n"; return 2;
+                    "       c4ben inspect-legacy|map <old-mod-dir> --catalog <dir> --character <chr_...> [--out mapping.json]\n"
+                    "       c4ben convert <old-mod-dir> --catalog <dir> --character <chr_...> --legacy-auto --out <out.bem>\n"; return 2;
         }
         if (string(argv[1]) == "inspect-legacy" || string(argv[1]) == "map") {
             string dir, catDir, character, outPath;
@@ -1554,18 +1582,31 @@ int main(int argc, char** argv) {
             if (dir.empty() || catDir.empty()) { cerr << "missing mod/catalog\n"; return 2; }
             return legacyInspect(dir, catDir, character, outPath);
         }
-        string dir, catDir, out, profile;
-        bool allowReview = false;
+        string dir, catDir, out, profile, character;
+        bool allowReview = false, legacyAuto = false;
         for (int i = 2; i < argc; i++) {
             string a = argv[i];
             if (a == "--catalog" && i + 1 < argc) catDir = argv[++i];
             else if (a == "--out" && i + 1 < argc) out = argv[++i];
             else if (a == "--profile" && i + 1 < argc) profile = argv[++i];
+            else if (a == "--character" && i + 1 < argc) character = argv[++i];
             else if (a == "--allow-review") allowReview = true;
+            else if (a == "--legacy-auto") legacyAuto = true;
             else dir = a;
         }
         if (dir.empty() || catDir.empty() || out.empty()) { cerr << "missing args\n"; return 2; }
         if (!profile.empty()) return convertLegacyProfile(dir, catDir, profile, out, allowReview);
+        if (legacyAuto && !character.empty()) {
+            try { return convertEfmi(dir, catDir, out); }
+            catch (exception& first) {
+                cerr << "catalog conversion failed (" << first.what() << "); trying legacy profile for " << character << "\n";
+                string mapping = out + ".mapping.json";
+                int rc = legacyInspect(dir, catDir, character, mapping);
+                if (rc != 0) throw;
+                cerr << "legacy mapping written: " << mapping << "\n";
+                return convertLegacyProfile(dir, catDir, mapping, out, true);
+            }
+        }
         return convertEfmi(dir, catDir, out);
     } catch (exception& e) { cerr << "ERROR: " << e.what() << "\n"; return 1; }
 }
