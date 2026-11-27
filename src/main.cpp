@@ -620,6 +620,25 @@ static int convertEff(const string& dir, const string& catDir, const string& out
         auto parts = effSplit(effKey(ini, rkey, "parts"), ',');
         if (parts.empty()) { cout << "skip replace " << rkey << ": no parts\n"; continue; }
 
+        // Pre-scan parts: the merged BEM mesh needs one attribute layout, so use
+        // the union of authored UV sets (UV0..UV7) and colour presence.
+        map<string,EffMesh> meshCache;
+        set<int> uvSetIndices;
+        bool anyColor = false;
+        for (auto& pname : parts) {
+            auto meshSec = partMesh.count(pname) ? partMesh[pname] : "";
+            if (meshSec.empty() || !meshPath.count(meshSec)) continue;
+            try {
+                if (!meshCache.count(meshSec)) meshCache[meshSec] = readEffMesh(dir + "/" + meshPath[meshSec]);
+                const EffMesh& m = meshCache[meshSec];
+                for (int uv = 0; uv < 8; uv++) if ((int)m.uv[uv].size() >= m.vcount * 2 && m.vcount > 0) uvSetIndices.insert(uv);
+                if ((int)m.col.size() >= m.vcount * 4 && m.vcount > 0) anyColor = true;
+            } catch (exception&) {}
+        }
+        if (uvSetIndices.empty()) uvSetIndices.insert(0);
+        if (!uvSetIndices.count(0)) uvSetIndices.insert(0);
+        vector<int> uvList(uvSetIndices.begin(), uvSetIndices.end());
+        const int s1stride = (int)uvList.size() * 8 + (anyColor ? 16 : 0);
         vector<uint8_t> s0, s1, s2; vector<uint32_t> indices;
         vector<cJSON*> bones; map<pair<int,int>,int> pal; bool ok = true; int totalIdx = 0;
         cJSON* jdraws = jarr();
@@ -627,7 +646,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
             auto meshSec = partMesh.count(pname) ? partMesh[pname] : "";
             if (meshSec.empty() || !meshPath.count(meshSec)) { cout << "skip part " << pname << ": no mesh path\n"; ok = false; break; }
             EffMesh m;
-            try { m = readEffMesh(dir + "/" + meshPath[meshSec]); }
+            try { m = meshCache.count(meshSec) ? meshCache[meshSec] : readEffMesh(dir + "/" + meshPath[meshSec]); }
             catch (exception& e) { cout << "skip part " << pname << ": " << e.what() << "\n"; ok = false; break; }
             if (m.vcount <= 0 || m.idx.empty()) { cout << "skip part " << pname << ": empty mesh\n"; ok = false; break; }
             // 材质/贴图
@@ -669,9 +688,15 @@ static int convertEff(const string& dir, const string& catDir, const string& out
                 for (int k = 0; k < 3; k++) pushf(s0, m.pos[v*3+k]);
                 for (int k = 0; k < 3; k++) pushf(s0, m.nrm.empty() ? 0.f : m.nrm[v*3+k]);
                 for (int k = 0; k < 4; k++) pushf(s0, m.tan.empty() ? (k == 3 ? 1.f : 0.f) : m.tan[v*4+k]);
-                // stream1: uv0 (+color if present)
-                for (int k = 0; k < 2; k++) pushf(s1, m.uv[0].empty() ? 0.f : m.uv[0][v*2+k]);
-                for (int k = 0; k < 4; k++) pushf(s1, m.col.empty() ? (k == 3 ? 1.f : 0.f) : m.col[v*4+k]);
+                // stream1: all authored UV sets (union) + colour when present
+                for (int uv : uvList) {
+                    const bool has = (int)m.uv[uv].size() >= m.vcount * 2;
+                    for (int k = 0; k < 2; k++) pushf(s1, has ? m.uv[uv][v*2+k] : 0.f);
+                }
+                if (anyColor) {
+                    const bool has = (int)m.col.size() >= m.vcount * 4;
+                    for (int k = 0; k < 4; k++) pushf(s1, has ? m.col[v*4+k] : (k == 3 ? 1.f : 0.f));
+                }
                 // stream2: u16 weights + u8 palette
                 float w[4] = {1,0,0,0}; uint32_t gb[4] = {0,0,0,0};
                 if (v < (int)m.skin.size()) { for (int k = 0; k < 4; k++) { w[k] = m.skin[v].w[k]; gb[k] = m.skin[v].b[k]; } }
@@ -746,11 +771,10 @@ static int convertEff(const string& dir, const string& catDir, const string& out
         cJSON* jattrs = jarr();
         auto attr = [&](int sem, int fmt, int dim, int stream, int off) { cJSON* a = jarr(); jadd(a,jnum(sem)); jadd(a,jnum(fmt)); jadd(a,jnum(dim)); jadd(a,jnum(stream)); jadd(a,jnum(off)); jadd(jattrs,a); };
         attr(0,0,3,0,0); attr(1,0,3,0,12); attr(2,0,4,0,24);
-        // EFF 路径的 s1 固定是 UV(8B) + color(16B) = 24B/顶点；必须与
-        // 实际 payload 长度一致，否则 BEM 规范的长度自洽校验会拒绝。
-        const int s1stride = 24;
-        attr(4,0,2,1,0);
-        attr(3,0,4,1,8);
+        // stream1 layout follows the UV-set union; every attribute is tightly packed.
+        int uvOffset = 0;
+        for (int uv : uvList) { attr(4 + uv, 0, 2, 1, uvOffset); uvOffset += 8; }
+        if (anyColor) attr(3,0,4,1,uvOffset);
         attr(12,4,4,2,0); attr(13,6,4,2,8);
         cJSON* jstreams = jarr();
         auto stream = [&](int stride, int payload) { cJSON* x = obj(nullptr); cJSON_AddNumberToObject(x,"stride",stride); cJSON_AddNumberToObject(x,"payload",payload); jadd(jstreams,x); };
