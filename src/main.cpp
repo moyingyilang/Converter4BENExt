@@ -1242,6 +1242,10 @@ static int convertLegacyProfile(const string& dir, const string& catDir, const s
 static int convertEfmi(const string& dir, const string& catDir, const string& out) {
         auto ini = Ini::parse(dir + "/mod.ini");
         if (effKey(ini, "Mod", "format") == "3") return convertEff(dir, catDir, out);
+        int componentEntries = 0;
+        for (auto& section : ini.order) if (effiComponentMid(section) >= 0) ++componentEntries;
+        if (componentEntries == 0)
+            throw runtime_error("not an EFMI model package (no TextureOverride_Component entry points)");
         vector<string> hashes;
         for (auto& s : ini.order) {
             if (effiComponentMid(s) < 0) continue;
@@ -1270,7 +1274,9 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
         map<int, TexRes> texRes;
         for (auto& s : ini.order) {
             if (s.rfind("Resource_Texture", 0) != 0) continue;
-            int n = stoi(s.substr(strlen("Resource_Texture")));
+            const string number = s.substr(strlen("Resource_Texture"));
+            if (number.empty() || number.find_first_not_of("0123456789") != string::npos) continue;
+            int n = stoi(number);
             auto it = ini.sec[s].find("filename"); if (it == ini.sec[s].end()) continue;
             auto hs = ini.sec["TextureOverride_Texture" + to_string(n)].find("hash");
             if (hs == ini.sec["TextureOverride_Texture" + to_string(n)].end()) continue;
@@ -1306,7 +1312,11 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             auto nib  = "Resource_Component" + to_string(mid) + "_IB";
             if (!ini.sec.count(nvb0) || !ini.sec.count(nvb2)) { cout << "skip comp " << mid << ": no VB\n"; continue; }
             auto rd = [&](const string& sec, int& stride, vector<uint8_t>& data) {
-                auto& d = ini.sec[sec]; stride = stoi(d["stride"]);
+                auto& d = ini.sec[sec];
+                const string strideText = d.count("stride") ? d["stride"] : string{};
+                if (strideText.empty() || strideText.find_first_not_of("0123456789") != string::npos)
+                    throw runtime_error("missing/invalid stride in [" + sec + "]");
+                stride = stoi(strideText);
                 data = readFile(dir + "/" + d["filename"]);
             };
             int s0, s1, s2, sib; vector<uint8_t> vb0, vb1, vb2, ib;

@@ -47,9 +47,23 @@
 
 `skipped(keep)` 是目标组件保留原模型（不是错误）；`FAIL` 只用于没有任何可用身份锚定的包。
 
+## 3.1 2026-11 新增样本（GameBanana 下载，19 个含 mod.ini）
+
+| 样本 | 类型 | 结果 | 说明 |
+|---|---|---|---|
+| FemaleEndminThiccMod | EFMI ALPHA-5 | FAIL（可用 profile） | 旧 hash 不匹配；`inspect-legacy --character chr_0003_endminf` 可生成 8 组件映射并转换成功 |
+| SI V1.0 | EFMI | OK（14 meshes） | 修复 `Resource_Texture_<hash>` 段名解析后通过 |
+| Fluorite OG GUI / Avywenna OG GUI | EFMI | OK | 模型包带 GUI |
+| Liino VELMORA / Ardelia SR / yif / kay Graffiti Girl | EFMI | OK | 含 keep 组件 |
+| 8 个 Kay 分类 mod | EFMI | FAIL | 当前 catalog 没有 Kay 角色 → 需要新 catalog/游戏资源 |
+| Advanced HUD Control / Dynamic Login Screen | GUI | 明确拒绝 | 不是模型包（无 Component 入口） |
+
+新增健壮性：非模型包给出明确错误；`Resource_Texture_<hash>`、缺 stride 不再抛 `stoi`。
+
 ## 4. 仍有缺口（需要更多样本/旧资料）
 
-1. **旧版 catalog/资源**：庄方宜旧包 11 个组件 hash 全不匹配，只有 mod 无法确定身份；
+1. **旧版/新版 catalog**：庄方宜旧包、FemaleEndminThiccMod（EFMI ALPHA-5）以及全部 Kay 分类 mod
+   都缺对应 catalog；Kay 是当前 catalog 里没有的角色，需要新游戏资源或 BEN 新版 catalog；
 2. **stride 8 的真实样本**：目前只有 playbook 规则，没有实机包；
 3. **EFMI 选项/热键包**：需要至少一个带选项的包验证 option_groups 映射；
 4. **EFF Format 2 / 其它版本**、武器/多角色/多 target 包；
