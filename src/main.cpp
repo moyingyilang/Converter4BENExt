@@ -221,7 +221,7 @@ static void writeZip(const string& path, vector<Entry>& es) {
     u32(0x06054b50); u16(0); u16(0); u16(es.size()); u16(es.size()); u32(cdSize); u32(cdStart); u16(0);
 }
 
-static void writeBem(const string& path, const vector<uint8_t>& manifest, const vector<vector<uint8_t>>& payloads) {
+static void writeBem(const string& path, const vector<uint8_t>& manifest, const vector<vector<uint8_t>>& payloads, int minor = 0) {
     // BEM 二进制容器：40B header + manifest + 32B * N entries + payload blocks
     uint64_t fileSize = 40 + manifest.size() + 32ull * payloads.size();
     for (auto& p : payloads) fileSize += p.size();
@@ -231,7 +231,7 @@ static void writeBem(const string& path, const vector<uint8_t>& manifest, const 
     auto put64 = [&](uint64_t v) { for (int i = 0; i < 8; i++) out.push_back((v >> (8 * i)) & 255); };
     const char magic[8] = {'B','E','M',0,'P','K','G',0};
     out.insert(out.end(), magic, magic + 8);
-    put16(1); put16(0); put32(40); put64(fileSize); put64(manifest.size()); put32((uint32_t)payloads.size()); put32(0);
+    put16(1); put16((uint16_t)minor); put32(40); put64(fileSize); put64(manifest.size()); put32((uint32_t)payloads.size()); put32(0);
     out.insert(out.end(), manifest.begin(), manifest.end());
     uint64_t off = 40 + manifest.size() + 32ull * payloads.size();
     for (auto& p : payloads) {
@@ -413,6 +413,77 @@ static bool effCatalogTexture(Cat& cat, const string& name, string& original) {
     return false;
 }
 
+struct EffMatData {
+    bool overrides = false;
+    map<string,double> floats;
+    map<string,array<double,4>> colors;
+    vector<string> enableKeywords, disableKeywords;
+    int renderQueue = -1;
+};
+
+static bool validMatProp(const string& name) {
+    if (name.size() < 2 || name.size() > 96 || name[0] != '_') return false;
+    for (char c : name) if (!(isalnum((unsigned char)c) || c == '_')) return false;
+    return true;
+}
+static bool validKeyword(const string& name) {
+    if (name.size() < 2 || name.size() > 96) return false;
+    for (char c : name) if (!(isupper((unsigned char)c) || isdigit((unsigned char)c) || c == '_')) return false;
+    return true;
+}
+static double parseDouble(const string& v) {
+    char* end = nullptr; double d = strtod(v.c_str(), &end);
+    if (end == v.c_str()) throw runtime_error("bad number: " + v);
+    return d;
+}
+// EFF material resource (kind=2) payload is a small line format:
+//   format=EFFMAT / float._P=v / value4._C=r,g,b,a / keyword._K=1|0 / render_queue=N
+// The trailing ";EFF_MATERIAL_IMPORT={...}" comment is ignored.
+static EffMatData parseEffMaterial(const string& path) {
+    auto b = readFile(path);
+    if (b.size() < 72 || memcmp(b.data(), "EFF_AUTHOR_FILE3", 16)) throw runtime_error("not EFF material: " + path);
+    if (rd32(b, 20) != 2) throw runtime_error("not a material resource: " + path);
+    size_t off = 72 + rd32(b, 24);
+    if (off >= b.size()) throw runtime_error("bad material payload: " + path);
+    EffMatData d;
+    string text((const char*)b.data() + off, b.size() - off);
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t nl = text.find('\n', pos);
+        string line = text.substr(pos, nl == string::npos ? string::npos : nl - pos);
+        pos = nl == string::npos ? text.size() : nl + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\0')) line.pop_back();
+        if (line.empty()) continue;
+        if (line[0] == ';') break;
+        if (line.rfind("overrides=", 0) == 0) { d.overrides = line.find("true") != string::npos; continue; }
+        if (line.rfind("render_queue=", 0) == 0) { d.renderQueue = atoi(line.c_str() + 13); continue; }
+        if (line.rfind("float.", 0) == 0) {
+            auto eq = line.find('='); if (eq == string::npos) continue;
+            string name = line.substr(6, eq - 6);
+            if (validMatProp(name)) d.floats[name] = parseDouble(line.substr(eq + 1));
+            continue;
+        }
+        if (line.rfind("value4.", 0) == 0) {
+            auto eq = line.find('='); if (eq == string::npos) continue;
+            string name = line.substr(7, eq - 7);
+            if (!validMatProp(name)) continue;
+            auto parts = effSplit(line.substr(eq + 1), ',');
+            if (parts.size() != 4) continue;
+            array<double,4> c{}; bool ok = true;
+            for (int i = 0; i < 4; i++) { c[i] = parseDouble(parts[i]); if (c[i] < 0 || c[i] > 8) ok = false; }
+            if (ok) d.colors[name] = c;
+            continue;
+        }
+        if (line.rfind("keyword.", 0) == 0) {
+            auto eq = line.find('='); if (eq == string::npos) continue;
+            string name = line.substr(8, eq - 8);
+            if (!validKeyword(name)) continue;
+            (parseDouble(line.substr(eq + 1)) > 0.5 ? d.enableKeywords : d.disableKeywords).push_back(name);
+        }
+    }
+    return d;
+}
+
 static int convertEff(const string& dir, const string& catDir, const string& out) {
     auto ini = Ini::parse(dir + "/mod.ini");
     auto format = effKey(ini, "Mod", "format");
@@ -423,6 +494,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     struct EffMat { string asset; vector<pair<string,string>> slots; };
     map<string, EffTex> tex;
     map<string, EffMat> mat;
+    map<string, EffMatData> matData;
     map<string, string> meshPath;
     map<string, string> partMesh, partMat;
     vector<string> replaceKeys;
@@ -448,6 +520,11 @@ static int convertEff(const string& dir, const string& catDir, const string& out
             EffMat m; m.asset = effKey(ini, s, "source.asset");
             for (auto& kv : d) if (kv.first.rfind("texture.", 0) == 0) m.slots.push_back({kv.first, kv.second});
             if (!m.asset.empty()) mat[s] = m;
+            auto resPath = effKey(ini, s, "path");
+            if (!resPath.empty()) {
+                try { matData[s] = parseEffMaterial(dir + "/" + resPath); }
+                catch (exception& e) { cerr << "material skip " << s << ": " << e.what() << "\n"; }
+            }
         } else if (s.rfind("Mesh", 0) == 0) {
             auto p = effKey(ini, s, "path"); if (!p.empty()) meshPath[s] = p;
         } else if (s.rfind("Part", 0) == 0) {
@@ -482,6 +559,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
 
     cJSON* jmeshes = jarr();
     map<int,int> meshIndex;
+    bool hasMatOverrides = false;
     map<int,int> cidToMesh;
     // 先决定目标/部件，再逐个目标合并
     set<int> hiddenTargets;
@@ -571,6 +649,41 @@ static int convertEff(const string& dir, const string& catDir, const string& out
             cJSON_AddNumberToObject(jd, "start", (int)baseIdx); cJSON_AddNumberToObject(jd, "count", (int)m.idx.size());
             cJSON_AddNumberToObject(jd, "material_component", cid); cJSON_AddNumberToObject(jd, "material_slot", slot);
             cJSON_AddStringToObject(jd, "material_name", materialName.c_str()); cJSON_AddItemToObject(jd, "textures", jtexIds);
+            auto mdIt = matData.find(mname);
+            if (mdIt != matData.end()) {
+                auto& md = mdIt->second;
+                cJSON* mo = obj(nullptr); bool any = false;
+                if (!md.floats.empty()) {
+                    cJSON* fl = obj(nullptr);
+                    for (auto& kv : md.floats) {
+                        if (kv.second < -128.0 || kv.second > 128.0) {
+                            cerr << "material skip float out of range: " << kv.first << "=" << kv.second << "\n";
+                            continue;
+                        }
+                        cJSON_AddNumberToObject(fl, kv.first.c_str(), kv.second);
+                    }
+                    if (fl->child) { cJSON_AddItemToObject(mo, "floats", fl); any = true; } else cJSON_Delete(fl);
+                }
+                if (!md.colors.empty()) {
+                    cJSON* cl = obj(nullptr);
+                    for (auto& kv : md.colors) {
+                        cJSON* v = jarr();
+                        for (double x : kv.second) jadd(v, cJSON_CreateNumber(x));
+                        cJSON_AddItemToObject(cl, kv.first.c_str(), v);
+                    }
+                    if (cl->child) { cJSON_AddItemToObject(mo, "colors", cl); any = true; } else cJSON_Delete(cl);
+                }
+                if (!md.enableKeywords.empty()) {
+                    cJSON* arr = jarr(); for (auto& k : md.enableKeywords) jadd(arr, jstrv(k));
+                    cJSON_AddItemToObject(mo, "enable_keywords", arr); any = true;
+                }
+                if (!md.disableKeywords.empty()) {
+                    cJSON* arr = jarr(); for (auto& k : md.disableKeywords) jadd(arr, jstrv(k));
+                    cJSON_AddItemToObject(mo, "disable_keywords", arr); any = true;
+                }
+                if (any) { cJSON_AddItemToObject(jd, "material_overrides", mo); hasMatOverrides = true; }
+                else cJSON_Delete(mo);
+            }
             jadd(jdraws, jd); totalIdx += (int)m.idx.size();
             cout << "part " << pname << ": v=" << m.vcount << " idx=" << m.idx.size() << " bonePalette=" << pal.size() << " tex=" << cJSON_GetArraySize(jtexIds) << "\n";
         }
@@ -643,6 +756,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     cJSON_AddStringToObject(mroot,"author","Converter4BENeXt");
     cJSON_AddStringToObject(mroot,"version","0.1.0");
     cJSON* caps = jarr(); for (auto s : {"native-materials","palette-u8","indices-u32","fixed-appearances"}) jadd(caps,jstrv(s));
+    if (hasMatOverrides) jadd(caps,jstrv("material-overrides-v1"));
     cJSON_AddItemToObject(mroot,"required_capabilities",caps);
     cJSON_AddItemToObject(mroot,"target",jtarget);
     cJSON_AddItemToObject(mroot,"meshes",jmeshes);
@@ -660,7 +774,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
         }
         writeZip(out, es);
     } else {
-        writeBem(out, manifest, payloads);
+        writeBem(out, manifest, payloads, hasMatOverrides ? 5 : 0);
     }
     cout << "written " << out << ": meshes=" << cJSON_GetArraySize(jmeshes) << " textures=" << cJSON_GetArraySize(jtextures) << " payloads=" << payloads.size() << "\n";
     cJSON_Delete(mroot); cJSON_Delete(cat.root);

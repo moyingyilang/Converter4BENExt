@@ -78,6 +78,7 @@ make            # -> build/c4ben
 
 - 贴图：DDS BC1/3/4/5/7 原生直通；BC2/DXT3 解码为 RGBA32；TGA/PNG/JPG 解码为 RGBA32；BC6H（HDR）明确拒绝。
 - EFF 的材质/贴图只在 catalog 里能找到同名 `source.asset` 时绑定；自定义 Liino 贴图会跳过并报告。
+- EFF `.effres` kind=2 已解析 float/color/keyword 并输出 BEM 1.5 `material_overrides`；`render_queue`/渲染状态暂未写入。
 - EFF 辅助骨骼用祖先替代，会损失飘带/裙摆的二级摆动。
 - EFF 的 blendshape、物理、特效、LOD 不转。
 - EFMI 支持标准 ComponentN 的 skin stride 4/8/12/16/24（8/4/24 为 L3 推断，见 docs/COVERAGE.md）；EFMI 选项/热键/多外观还没有映射到 BEM option_groups。
