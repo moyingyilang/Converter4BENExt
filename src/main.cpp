@@ -2840,17 +2840,147 @@ static int genFixture(const string& outDir, const string& catDir, const string& 
 }
 
 
+// ---- EFF 材质覆盖 fixture ----------------------------------------------
+// 给已有的 EFF mod 目录注入两组材质资源，用于 BEM 1.5 回归：
+//   [MaterialC4benMatched]    source.asset 命中 catalog materials → 应产出 material_overrides
+//   [MaterialC4benUnmatched]  source.asset 故意不存在          → 应打印 material skip 并丢弃 overrides
+// 两组都写 float / value4 / keyword / render_queue 和一个 texture.<prop> 引用，
+// 并且各自新增一个 [Part*] 复用已有 mesh，让覆盖真正挂到 draw 上。
+static vector<uint8_t> effMaterialFile(const string& text) {
+    vector<uint8_t> b(72, 0);
+    memcpy(b.data(), "EFF_AUTHOR_FILE3", 16);
+    auto put32 = [&](size_t at, uint32_t v) { memcpy(&b[at], &v, 4); };
+    put32(16, 3);  // EFF 版本
+    put32(20, 2);  // kind=2 材质资源
+    put32(24, 0);  // meta 大小 → 文本紧跟在 72 字节头后
+    b.insert(b.end(), text.begin(), text.end());
+    return b;
+}
+
+static int genEffOverrides(const string& modDir, const string& catDir, const string& character) {
+    const string iniPath = modDir + "/mod.ini";
+    if (!fs::exists(iniPath)) throw runtime_error("not an EFF mod dir (mod.ini missing): " + modDir);
+    Ini ini = Ini::parse(iniPath);
+
+    set<string> targets;
+    for (auto& s : ini.order)
+        if (s.rfind("Replace", 0) == 0) { auto t = effKey(ini, s, "target.asset"); if (!t.empty()) targets.insert(t); }
+
+    Cat cat = character.empty() ? loadCatalogByMeshes(catDir, targets) : loadCatalogByCharacter(catDir, character);
+
+    // 取任一有 materials 的组件里第一个材质名作为「命中」目标
+    string matched;
+    if (cJSON_IsObject(cat.comps))
+        for (auto* c = cat.comps->child; c && matched.empty(); c = c->next) {
+            auto* mats = get(c, "materials");
+            if (!cJSON_IsArray(mats) || cJSON_GetArraySize(mats) == 0) continue;
+            auto* m0 = cJSON_GetArrayItem(mats, 0);
+            if (cJSON_IsString(m0) && m0->valuestring[0]) matched = m0->valuestring;
+        }
+    if (matched.empty()) throw runtime_error("catalog has no materials for any component");
+
+    string meshSec, firstTex;
+    for (auto& s : ini.order) {
+        if (meshSec.empty() && s.rfind("Part", 0) == 0) meshSec = effKey(ini, s, "mesh");
+        if (firstTex.empty() && s.rfind("Texture", 0) == 0) firstTex = s;
+    }
+    if (meshSec.empty()) throw runtime_error("mod.ini has no [Part*] section with mesh=");
+
+    fs::create_directories(modDir + "/Materials");
+    const string body =
+        "overrides=true\n"
+        "render_queue=2450\n"
+        "float._C4benScalarA=0.5\n"
+        "float._C4benScalarB=-1.25\n"
+        "value4._C4benColorA=0.1,0.2,0.3,1\n"
+        "keyword._C4BENFIXTURE=1\n"
+        ";EFF_MATERIAL_IMPORT={}\n";
+    writeFile(modDir + "/Materials/c4ben_matched.effres", effMaterialFile(body));
+    writeFile(modDir + "/Materials/c4ben_unmatched.effres", effMaterialFile(body));
+
+    string add;
+    add += "[MaterialC4benMatched]\nsource.asset = " + matched + "\npath = Materials/c4ben_matched.effres\n";
+    if (!firstTex.empty()) add += "texture._BaseMap = " + firstTex + "\n";
+    add += "\n[MaterialC4benUnmatched]\nsource.asset = M_c4ben_no_such_material\n"
+           "path = Materials/c4ben_unmatched.effres\n";
+    if (!firstTex.empty()) add += "texture._BaseMap = " + firstTex + "\n";
+    add += "\n[PartC4benMatched]\nmesh = " + meshSec + "\nmaterial = MaterialC4benMatched\n";
+    add += "\n[PartC4benUnmatched]\nmesh = " + meshSec + "\nmaterial = MaterialC4benUnmatched\n";
+
+    // Part 列表是从 [Replace*] 的 parts= 键枚举的（逗号分隔），新增的 Part 必须挂进去，
+    // 否则转换器根本不会遍历它们。Ini 解析取首个同名键，所以必须就地改写那一行。
+    auto raw = readFile(iniPath);
+    string text((const char*)raw.data(), raw.size());
+    bool patched = false;
+    {
+        size_t pos = 0;
+        while (pos < text.size()) {
+            size_t nl = text.find('\n', pos);
+            const size_t end = nl == string::npos ? text.size() : nl;
+            string line = text.substr(pos, end - pos);
+            string probe = line;
+            for (auto& ch : probe) ch = (char)tolower((unsigned char)ch);
+            const size_t nb = probe.find_first_not_of(" \t\r");
+            if (nb != string::npos && probe.compare(nb, 5, "parts") == 0) {
+                size_t eq = line.find('=');
+                if (eq != string::npos) {
+                    string v = line.substr(eq + 1);
+                    while (!v.empty() && (v.back() == '\r' || v.back() == ' ' || v.back() == '\t')) v.pop_back();
+                    if (v.find("PartC4benMatched") == string::npos) {
+                        text = text.substr(0, pos) + line.substr(0, eq + 1) + v +
+                               ",PartC4benMatched,PartC4benUnmatched" + text.substr(end);
+                        patched = true;
+                    }
+                }
+                break;
+            }
+            if (nl == string::npos) break;
+            pos = nl + 1;
+        }
+    }
+    if (!patched) cerr << "warning: 未找到 [Replace*] 的 parts= 行；新增 Part 可能不会被转换\n";
+    text += "\n";
+    text += add;
+    writeFile(iniPath, vector<uint8_t>(text.begin(), text.end()));
+
+    cout << "fixture-eff-overrides: " << modDir << "\n"
+         << "  matched material   : " << matched << "  (期望产出 material_overrides)\n"
+         << "  unmatched material : M_c4ben_no_such_material  (期望 material skip)\n"
+         << "  mesh section       : " << meshSec << "\n"
+         << "  texture reference  : " << (firstTex.empty() ? "(none)" : firstTex) << "\n"
+         << "  target character   : " << cat.character << "\n";
+    cJSON_Delete(cat.root);
+    return 0;
+}
+
+
 #ifndef C4BEN_NO_MAIN
 int main(int argc, char** argv) {
     atexit(cleanupExtracted);
     try {
         if (argc < 2 || (string(argv[1]) != "convert" && string(argv[1]) != "inspect-legacy" &&
-                         string(argv[1]) != "map" && string(argv[1]) != "fixture")) {
+                         string(argv[1]) != "map" && string(argv[1]) != "fixture" &&
+                         string(argv[1]) != "fixture-eff-overrides")) {
             cerr << "usage: c4ben convert <mod-dir> --catalog <catalog-dir> --out <out.bem>\n"
                     "       c4ben inspect-legacy|map <old-mod-dir> --catalog <dir> --character <chr_...> [--out mapping.json]\n"
                     "       c4ben convert <old-mod-dir> --catalog <dir> --character <chr_...> --legacy-auto --out <out.bem>\n"
                     "       c4ben fixture <out-dir> --catalog <dir> --character <chr_...>   (合成回归包，不含游戏资源)\n"
+                    "       c4ben fixture-eff-overrides <eff-mod-dir> --catalog <dir> [--character <chr_...>]   (注入材质覆盖，验证 BEM 1.5)\n"
                     "       add --texture-fingerprint to map hash-drifted DDS by unique descriptor\n"; return 2;
+        }
+        if (string(argv[1]) == "fixture-eff-overrides") {
+            string modDir, catDir, character;
+            for (int i = 2; i < argc; i++) {
+                string a = argv[i];
+                if (a == "--catalog" && i + 1 < argc) catDir = argv[++i];
+                else if (a == "--character" && i + 1 < argc) character = argv[++i];
+                else modDir = a;
+            }
+            if (modDir.empty() || catDir.empty()) {
+                cerr << "usage: c4ben fixture-eff-overrides <eff-mod-dir> --catalog <dir> [--character <chr_...>]\n"; return 2;
+            }
+            if (!character.empty()) g_forceCharacter = character;
+            return genEffOverrides(modDir, catDir, character);
         }
         if (string(argv[1]) == "fixture") {
             string outDir, catDir, character;
