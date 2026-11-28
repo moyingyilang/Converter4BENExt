@@ -811,7 +811,17 @@ static int convertEff(const string& dir, const string& catDir, const string& out
             auto* comp = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
             auto* mats = get(comp, "materials"); int slot = 0; string materialName = jstr(comp, "materials") ;
             auto* m0 = cJSON_GetArrayItem(mats, 0); if (m0) materialName = m0->valuestring;
-            for (int i = 0; i < cJSON_GetArraySize(mats); i++) { auto* x = cJSON_GetArrayItem(mats, i); if (cJSON_IsString(x) && em.asset == x->valuestring) { slot = i; materialName = x->valuestring; break; } }
+            // EFF 材质名必须能在 catalog 的 materials 里找到，否则不能声称这对得上。
+            // 以前会静默回落到 slot 0，把别的材质的 material_overrides 挂到槽 0 上，
+            // 结构合法但语义错误——这里改为：没匹配就不写 material_overrides。
+            bool matMatched = em.asset.empty();
+            for (int i = 0; i < cJSON_GetArraySize(mats); i++) {
+                auto* x = cJSON_GetArrayItem(mats, i);
+                if (cJSON_IsString(x) && em.asset == x->valuestring) { slot = i; materialName = x->valuestring; matMatched = true; break; }
+            }
+            if (!matMatched)
+                cerr << "material skip: " << em.asset << " not in catalog materials of component " << cid
+                     << " (material_overrides dropped)\n";
             cJSON* jtexIds = jarr(); set<int> seenTex;
             for (auto& [prop, ts] : em.slots) {
                 auto it = tex.find(ts); if (it == tex.end()) continue;
@@ -873,7 +883,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
             cJSON_AddNumberToObject(jd, "material_component", cid); cJSON_AddNumberToObject(jd, "material_slot", slot);
             cJSON_AddStringToObject(jd, "material_name", materialName.c_str()); cJSON_AddItemToObject(jd, "textures", jtexIds);
             auto mdIt = matData.find(mname);
-            if (mdIt != matData.end()) {
+            if (mdIt != matData.end() && matMatched) {
                 auto& md = mdIt->second;
                 cJSON* mo = obj(nullptr); bool any = false;
                 if (!md.floats.empty()) {
