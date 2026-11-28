@@ -137,4 +137,28 @@ static inline int encodeRgbaBc5(const std::vector<uint8_t>& rgba, int w, int h, 
     return 27;
 }
 
+// BC4：单通道（R），用于 mask/roughness/metal 类贴图。BEM fmt=26，8B/块。
+static inline int encodeRgbaBc4(const std::vector<uint8_t>& rgba, int w, int h, int mips, std::vector<uint8_t>& out) {
+    size_t need = 0;
+    for (int m = 0; m < mips; m++) need += (size_t)std::max(1, w >> m) * std::max(1, h >> m) * 4;
+    if (rgba.size() < need) throw std::runtime_error("bc_encode: RGBA payload shorter than mip chain");
+    out.clear();
+    for (int m = 0; m < mips; m++) {
+        int mw = std::max(1, w >> m), mh = std::max(1, h >> m);
+        int bw = (mw + 3) / 4, bh = (mh + 3) / 4;
+        for (int by = 0; by < bh; by++) for (int bx = 0; bx < bw; bx++) {
+            uint8_t px[16][4];
+            for (int py = 0; py < 4; py++) for (int pxx = 0; pxx < 4; pxx++) {
+                int x = std::min(bx * 4 + pxx, mw - 1), y = std::min(by * 4 + py, mh - 1);
+                const uint8_t* s = &rgba[((size_t)y * mw + x) * 4];
+                for (int k = 0; k < 4; k++) px[py * 4 + pxx][k] = s[k];
+            }
+            uint8_t blk[8];
+            encodeBc4Block(px, blk, 0);
+            out.insert(out.end(), blk, blk + 8);
+        }
+    }
+    return 26;
+}
+
 }

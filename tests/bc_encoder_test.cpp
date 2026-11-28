@@ -57,9 +57,32 @@ static double roundtripBc5() {
     return std::sqrt((double)err / (W * H * 2));
 }
 
+static double roundtripBc4() {
+    const int W = 32, H = 32;
+    std::vector<uint8_t> rgba((size_t)W * H * 4);
+    for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+        size_t i = ((size_t)y * W + x) * 4;
+        rgba[i] = (uint8_t)(x * 8); rgba[i + 1] = 0; rgba[i + 2] = 0; rgba[i + 3] = 255;
+    }
+    std::vector<uint8_t> enc;
+    int fmt = c4ben_bc::encodeRgbaBc4(rgba, W, H, 1, enc);
+    if (fmt != 26) { fprintf(stderr, "bc4 fmt mismatch\n"); return 1e9; }
+    std::vector<uint8_t> dec((size_t)W * H);
+    for (int by = 0; by < H; by += 4) for (int bx = 0; bx < W; bx += 4) {
+        int bi = (by / 4) * (W / 4) + bx / 4;
+        bcdec_bc4(enc.data() + bi * 8, dec.data() + (size_t)by * W + bx, W);
+    }
+    long long err = 0;
+    for (int i = 0; i < W * H; i++) {
+        int dr = (int)dec[i] - (int)rgba[i * 4];
+        err += dr * dr;
+    }
+    return std::sqrt((double)err / (W * H));
+}
+
 int main() {
-    double o = roundtrip(false), a = roundtrip(true), n = roundtripBc5();
-    printf("BC1 rmse=%.2f  BC3 rmse=%.2f  BC5 rg-rmse=%.2f\n", o, a, n);
-    if (o > 35.0 || a > 35.0 || n > 35.0) { fprintf(stderr, "BC encoder roundtrip error too high\n"); return 1; }
+    double o = roundtrip(false), a = roundtrip(true), n = roundtripBc5(), m = roundtripBc4();
+    printf("BC1 rmse=%.2f  BC3 rmse=%.2f  BC5 rg-rmse=%.2f  BC4 r-rmse=%.2f\n", o, a, n, m);
+    if (o > 35.0 || a > 35.0 || n > 35.0 || m > 35.0) { fprintf(stderr, "BC encoder roundtrip error too high\n"); return 1; }
     return 0;
 }

@@ -223,6 +223,14 @@ static bool normalLikeName(const string& name) {
     return false;
 }
 
+static bool maskLikeName(const string& name) {
+    string s = lower(name);
+    for (const char* token : {"_mask", "mask", "rough", "metal", "_mra", "_orm", "_ao", "_r."}) {
+        if (s.find(token) != string::npos) return true;
+    }
+    return false;
+}
+
 static void applyTextureCompression(Dds& d, const string& hint) {
     if (!g_textureCompress || d.fmt != 4 || d.data.empty()) return;
     // 第一版只压 mip0：DDS 多 mip 链若只压一部分会让 payload 长度不匹配。
@@ -242,6 +250,21 @@ static void applyTextureCompression(Dds& d, const string& hint) {
                  << " bytes (normal-like: " << hint << ")\n";
         } catch (exception& e) {
             cerr << "texture compress skipped (BC5 failed): " << e.what() << "\n";
+        }
+        return;
+    }
+    // mask/roughness/metal：单通道，BC4 保留 8-bit 精度，避免 BC1 5:6:5 截断。
+    if (maskLikeName(hint)) {
+        try {
+            vector<uint8_t> out;
+            const size_t before = d.data.size();
+            int fmt = c4ben_bc::encodeRgbaBc4(d.data, d.w, d.h, d.mips, out);
+            d.data.swap(out);
+            d.fmt = fmt;
+            cerr << "texture compress: BC4 " << before << " -> " << d.data.size()
+                 << " bytes (mask-like: " << hint << ")\n";
+        } catch (exception& e) {
+            cerr << "texture compress skipped (BC4 failed): " << e.what() << "\n";
         }
         return;
     }
