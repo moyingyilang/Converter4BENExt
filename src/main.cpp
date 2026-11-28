@@ -945,7 +945,51 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     cJSON_AddStringToObject(mroot,"name",("Converter4BENeXt EFF: "+fs::path(dir).filename().string()).c_str());
     cJSON_AddStringToObject(mroot,"author","Converter4BENeXt");
     cJSON_AddStringToObject(mroot,"version","0.1.0");
-    cJSON* caps = jarr(); for (auto s : {"native-materials","palette-u8","indices-u32","fixed-appearances"}) jadd(caps,jstrv(s));
+    cJSON* caps = jarr(); for (auto s : {"native-materials","palette-u8","indices-u32"}) jadd(caps,jstrv(s));
+    // minor>=1 的包必须是「组合选项」形态：需要 option_groups + component_rules，
+    // 且 draw 自带 indices/count；否则 bem_v1 会报 BEM version/manifest mismatch。
+    // 1.5 的 material_overrides 需要完整的 1.1 结构（option_groups/component_rules/
+    // draw 级 indices）。EFF 的 draw 切分尚未对齐 validator，先降级为合法的 BEM 1.0，
+    // 并明确告知 overrides 未写入——不产出会被拒绝的包。
+    const bool asV11 = false;
+    if (hasMatOverrides) {
+        cout << "warning: material_overrides 需要 BEM 1.5 结构，当前降级为 1.0 并丢弃该字段\n";
+        for (auto* mesh = jmeshes->child; mesh; mesh = mesh->next)
+            for (auto* d = (get(mesh, "draws") ? get(mesh, "draws")->child : nullptr); d; d = d->next)
+                cJSON_DeleteItemFromObject(d, "material_overrides");
+        hasMatOverrides = false;
+        hasRenderState = false;
+    }
+    if (asV11) {
+        jadd(caps, jstrv("composable-options"));
+        for (auto* mesh = jmeshes->child; mesh; mesh = mesh->next) {
+            auto* draws = get(mesh, "draws");
+            auto* idx = get(mesh, "indices");
+            if (!cJSON_IsArray(draws) || !idx) continue;
+            const int basePayload = idx->valueint;
+            if (basePayload < 0 || basePayload >= (int)payloads.size()) continue;
+            const vector<uint8_t> ibytes = payloads[basePayload];
+            for (auto* d = draws->child; d; d = d->next) {
+                int start = jint(d, "start");
+                int count = jint(d, "count");
+                if (count <= 0) count = jint(d, "index_count");
+                if (start < 0) start = 0;
+                const size_t off = std::min<size_t>((size_t)start * 2, ibytes.size());
+                const size_t len = std::min<size_t>((size_t)count * 2, ibytes.size() - off);
+                vector<uint8_t> slice(ibytes.begin() + off, ibytes.begin() + off + len);
+                const int pid = addPayload(std::move(slice));
+                cJSON_DeleteItemFromObject(d, "start");
+                cJSON_DeleteItemFromObject(d, "count");
+                cJSON_DeleteItemFromObject(d, "indices");
+                cJSON_AddNumberToObject(d, "indices", pid);
+                cJSON_AddNumberToObject(d, "count", (int)(len / 2));
+            }
+            cJSON_DeleteItemFromObject(mesh, "indices");
+            cJSON_DeleteItemFromObject(mesh, "index_count");
+        }
+    } else {
+        jadd(caps, jstrv("fixed-appearances"));
+    }
     if (hasMatOverrides) jadd(caps,jstrv("material-overrides-v1"));
     if (hasRenderState) jadd(caps,jstrv("material-render-state-v1"));
     cJSON_AddItemToObject(mroot,"required_capabilities",caps);
@@ -953,8 +997,32 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     requireNonEmptyOutput(jmeshes, jtextures, out);
     cJSON_AddItemToObject(mroot,"meshes",jmeshes);
     cJSON_AddItemToObject(mroot,"textures",jtextures);
-    cJSON_AddStringToObject(mroot,"default_appearance_id","default");
-    cJSON_AddItemToObject(mroot,"appearances",japps);
+    if (asV11) {
+        cJSON_AddItemToObject(mroot, "option_groups", jarr()); // 1.5 允许空数组
+        cJSON* jrules = jarr();
+        for (size_t ti = 0; ti < cat.ids.size(); ti++) {
+            const int cid = cat.ids[ti];
+            cJSON* rule = obj(nullptr);
+            cJSON_AddNumberToObject(rule, "target", (int)ti);
+            cJSON* cands = jarr();
+            cJSON* c = obj(nullptr);
+            auto mi = cidToMesh.find(cid);
+            if (mi != cidToMesh.end()) {
+                cJSON_AddStringToObject(c, "operation", "replace");
+                cJSON_AddNumberToObject(c, "mesh", mi->second);
+            } else if (hiddenTargets.count(cid)) {
+                cJSON_AddStringToObject(c, "operation", "hide");
+            } else {
+                cJSON_AddStringToObject(c, "operation", "keep");
+            }
+            jadd(cands, c); cJSON_AddItemToObject(rule, "candidates", cands);
+            jadd(jrules, rule);
+        }
+        cJSON_AddItemToObject(mroot, "component_rules", jrules);
+    } else {
+        cJSON_AddStringToObject(mroot,"default_appearance_id","default");
+        cJSON_AddItemToObject(mroot,"appearances",japps);
+    }
     char* json = cJSON_PrintUnformatted(mroot); if (!json) throw runtime_error("manifest serialize failed");
     vector<uint8_t> manifest((uint8_t*)json, (uint8_t*)json + strlen(json)); free(json);
     // 与 EFMI 路径一致：输出名以 .zip 结尾时写 BEM 原生 ZIP 容器，否则写二进制容器。

@@ -90,7 +90,7 @@ make            # -> build/c4ben
 
 - 贴图：DDS BC1/3/4/5/7 原生直通；BC2/DXT3 解码为 RGBA32；TGA/PNG/JPG 解码为 RGBA32；BC6H（HDR）、cubemap、volume、texture array 明确拒绝（BEM 2D 无法表达）。
 - EFF 的材质/贴图只在 catalog 里能找到同名 `source.asset` 时绑定；自定义 Liino 贴图会跳过并报告。
-- EFF `.effres` kind=2 已解析 float/color/keyword 并输出 BEM 1.5 `material_overrides`；`render_queue` 与 `shader_passes` 已写入该段。
+- EFF `.effres` kind=2 已解析 float/color/keyword；`material_overrides`（含 `render_queue`、`shader_passes`）需要 BEM 1.5 的完整组合结构，**当前降级为合法的 BEM 1.0 并丢弃该字段**（运行时会打印 warning），不产出会被 validator 拒绝的包。
 - EFF 辅助骨骼用祖先替代，会损失飘带/裙摆的二级摆动。
 - EFF 的 blendshape、物理、特效、LOD 不转；EFF 网格的 UV0–UV7 并集与 color 会保留。
 - EFMI 支持标准 ComponentN 的 skin stride 4/8/12/16/24（8/4/24 为 L3 推断，见 docs/COVERAGE.md）；EFMI 选项/热键/多外观会检测并打印（KeySwap/KeyToggle），`--option-report` 导出选项组与 `$draw_*` 的「组+取值 → 组件」条件，`--emit-options` 可输出 **BEM 1.1**（`option_groups` + `component_rules`，KeySwap 多外观保留）。限制：条件只表达单组的「等于」判断，且要求 catalog 提供完整 `attributes`、三条流 stride 与属性布局可由重排对齐；不满足时自动退回 BEM 1.0 并说明原因。
