@@ -22,7 +22,7 @@
 | EFF | `handling=replace/keep/skip/hide` | ✅ | hide → BEM `operation: hide`，skip/keep → `keep` |
 | EFF | `.effres` kind=2 材质参数/颜色/关键字 | ✅ | 解析 `float.*` / `value4.*` / `keyword.*` / `render_queue`，输出 BEM 1.5 `draws[].material_overrides` |
 | EFF | `render_queue` / 渲染状态 | ✅ | 输出 `material_overrides.render_queue` + `shader_passes`（来自材质 JSON 的 `disabledShaderPasses`），声明 `material-render-state-v1` |
-| EFF | `.effres` 的 `texture.<prop>` 槽位语义 | 🟡 | **只解析、不落到 manifest**：目前贴图进 `draw.textures`（匿名整数引用），未生成 `texture_slots`；缺 `property_id`，见 §6 |
+| EFF | `.effres` 的 `texture.<prop>` 槽位语义 | 🟡 | 默认写裸整数引用；`--texture-slots` 可产出 BEM 1.2+ `texture_slots`（格式按规范实现，运行时支持待确认，见 §6.1） |
 | EFF | 材质名不在 catalog `materials` 里 | ✅ | 打印 `material skip: <asset> not in catalog materials of component <cid> (material_overrides dropped)`，丢弃覆盖而不是回落到 slot 0 |
 | EFF | `.effres` 未声明 `render_queue` | ✅ | 不写该字段（`-1` 只是「未设置」哨兵，不当数据发射；见 §6） |
 | EFF | 物理/特效/blendshape/LOD | ❌ | 不是 BEM 1.0 可表达范围，需明确声明不支持 |
@@ -124,27 +124,30 @@ BEM_CLI=/path/to/be-bem tests/coverage.sh <mods-root> <BEN-catalog-dir> build/co
 
 ## 6. 已知限制（语义未闭环，不是 bug）
 
-### 6.1 `texture.<prop>` 槽位未映射到 `texture_slots`
+### 6.1 `texture.<prop>` 槽位：格式不需要 property_id（此前判断有误）
 
-EFF 材质 `.effres` 里有 `texture._BaseMap=<Texture 段名>` 这类行，转换器目前**只解析**，贴图统一进 `draw.textures`（裸整数 = anonymous 引用），不生成 BEM 1.2+ 的 `texture_slots`。
+**更正**：早先本文件写「缺 `property_id`，不能生成 `texture_slots`」。核对规范与参考实现后，这个前提不成立：
 
-原因（依据 BEN 侧文档与源码）：
+- `texture_slots[].id` 在格式里是**字符串标签**（如 `"dress_d"`），由包自己决定，不是运行时属性 ID
+  （`BEM_FORMAT_SPEC.md` §9 的示例即 `{"id": "dress_d", "candidates": [...]}`）；
+- 运行时**按候选贴图的 `original_name` 逐字匹配原贴图**来替换（`BEM_FORMAT_SPEC.md` §9 前文）；
+- `bem_v11.py` 用 `slot_ids = {slot['id']: index ...}` 与 `{"slot": id}` 解析，不涉及数值 ID；
+- `property_id` 只出现在 `tools/CustomModel/test_runtime_sweep.py` 的**运行时材质模型**里，
+  那是运行时候的内部表示，不是 pack 字段。
 
-- `texture_slots[].id` 必须是运行时 `material.get_texture_property_ids` 返回的 **int32 属性 ID**；
-- catalog 的 `material_texture_properties` 只有 `property`（`_BaseMap` 等）与 `name`，**没有数值 ID**；
-- `docs/custom_model/research/1.5.3/runtime-probes/CUSTOM_MODEL_RUNTIME_PROBE_ZHUANGFANGYI.md:53` 明确要求「保留实际 `property_id`；……不能猜测 ID→名称映射」。
+因此转换器已能产出槽，通过 **`--texture-slots`**（默认关闭）：
 
-**强行生成只能编造 ID，运行时匹配不上，比不写更糟。** 因此当前选择保持匿名整数引用（结构合法、校验通过），语义留白。
+- 槽 id 由材质属性名净化得到（`texture._BaseMap` → `basemap`，`texture._BumpMap` → `bumpmap`）；
+- 候选写成 `[{"texture": <textures[] 索引>}]`（单候选即「无条件成立」，满足「每槽恰好一个候选」）；
+- `draw.textures` 改写为 `[{"slot": "basemap"}, ...]`，并在 capabilities 声明 `texture-slots`；
+- 同一 draw 内按 `original_name` 去重，冲突的贴图退回裸整数，满足「各槽替换的原贴图互不相同」。
 
-解除条件（任一）：
+**默认仍关闭**，原因是运行时支持未确认：如果 BEN 运行时尚未消费 `texture_slots`，
+这些槽会被忽略、对应贴图整个失效——比保持当前的裸整数更糟。等运行时可验证后
+（例如加载带槽的包后确认贴图生效）再考虑改默认。
 
-1. 从 BEN 运行时 / VFS 导出 `material.get_texture_property_ids`（属性名 → int32），catalog 扩展为
-   `material_texture_properties: [{property, name, property_id}]`；
-2. 或 BEN 侧提供属性 ID 的静态表。
-
-具备数据后再生成 `texture_slots` + `draw.textures` 的 `{slot: <id>}` 命名引用（需要 minor≥2 并声明 `texture-slots`）。
-
-`fixture-eff-overrides` 注入里的 `texture._BaseMap` 只用于验证**解析路径**，不承诺 manifest 语义。
+验证：`tests/texture_slots_test.sh`（7 项），默认输出无槽、开启后槽+能力+引用齐全，
+native `be-bem` v1.5 与 `bem_tool.py`（`success=true, issues=[]`）均通过。
 
 ### 6.2 `render_queue` 的 `-1` 不当数据发射
 

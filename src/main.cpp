@@ -40,6 +40,10 @@ static bool g_noOptions = false;   // --no-options：即使源包有 KeySwap/Key
 static bool g_textureCompress = false; // --texture-compress：RGBA32 -> BC1/BC3
 static bool g_fixtureRabbitFx = false; // fixture --rabbitfx：生成 RabbitFX 风格贴图绑定
 static bool g_fixtureMaskTexture = false; // fixture --mask-texture：加一张 mask 类贴图，覆盖 BC4 路径
+// --texture-slots：BEM 1.2+ 贴图槽，把 draw.textures 的裸整数换成 {"slot": id}。
+// 默认关闭：格式已按规范实现并通过两份校验器，但 BEN 运行时是否已消费 texture_slots
+// 尚未确认；若运行时忽略该字段，贴图会整个失效，所以必须先 opt-in。
+static bool g_textureSlots = false;
 // 显式开启的旧布局兼容：源 VB 缺少目标尾部顶点属性时补零，而不是直接拒绝。
 // 只允许 source stride < target stride；不做删除/重排，避免静默猜布局。
 static bool g_compatLayout = false;
@@ -770,6 +774,9 @@ static int convertEff(const string& dir, const string& catDir, const string& out
 
     vector<vector<uint8_t>> payloads;
     auto addPayload = [&](vector<uint8_t> b) { payloads.push_back(std::move(b)); return (int)payloads.size() - 1; };
+    // 每个 draw 的贴图槽定义（属性名 -> textures[] 索引），与 draw 出现顺序一致。
+    // 必须在函数级声明：draw 在 parts 循环里构建，槽引用在 manifest 组装阶段才落地。
+    vector<vector<pair<string,int>>> drawSlots;
     cJSON* jtextures = jarr();
     map<string,int> texIndex; // original_name -> textures[] index
     auto addTexture = [&](const string& asset, const string& ddsPath, bool srgbOverride = false) -> int {
@@ -862,12 +869,29 @@ static int convertEff(const string& dir, const string& catDir, const string& out
                 cerr << "material skip: " << em.asset << " not in catalog materials of component " << cid
                      << " (material_overrides dropped)\n";
             cJSON* jtexIds = jarr(); set<int> seenTex;
+            // BEM 1.2+ 贴图槽：记录「属性名 -> textures[] 索引」，
+            // 等确定 minor>=2 时再把 draw.textures 换成 {"slot": id} 引用。
+            vector<pair<string,int>> partSlots;
             for (auto& [prop, ts] : em.slots) {
                 auto it = tex.find(ts); if (it == tex.end()) continue;
                 auto tpath = it->second.dds; if (tpath.empty()) continue;
                 int ti = addTexture(it->second.asset, dir + "/" + tpath, it->second.srgb);
-                if (ti >= 0 && !seenTex.count(ti)) { seenTex.insert(ti); jadd(jtexIds, jnum(ti)); }
+                if (ti >= 0 && !seenTex.count(ti)) {
+                    seenTex.insert(ti); jadd(jtexIds, jnum(ti));
+                    // prop 形如 "texture._BaseMap"；槽 id 用属性名净化后的形式。
+                    string pn = prop;
+                    const string pfx = "texture.";
+                    if (pn.rfind(pfx, 0) == 0) pn = pn.substr(pfx.size());
+                    string sid;
+                    for (char ch : pn) {
+                        if (isalnum((unsigned char)ch)) sid += (char)tolower((unsigned char)ch);
+                        else if (!sid.empty() && sid.back() != '_') sid += '_';
+                    }
+                    while (!sid.empty() && sid.back() == '_') sid.pop_back();
+                    if (!sid.empty()) partSlots.push_back({sid, ti});
+                }
             }
+            drawSlots.push_back(partSlots);
             // 骨骼 palette
             vector<int> local(m.bonePaths.size(), -1);
             if (m.bonePaths.empty()) { cout << "skip part " << pname << ": no bones\n"; ok = false; break; }
@@ -1108,6 +1132,55 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     } else {
         cJSON_AddStringToObject(mroot,"default_appearance_id","default");
         cJSON_AddItemToObject(mroot,"appearances",japps);
+    }
+    // BEM 1.2+ 贴图槽：minor>=2 时把 draw.textures 的裸整数换成 {"slot": id}。
+    // 槽的语义由候选贴图的 original_name 决定（运行时按名字逐字匹配原贴图替换），
+    // pack 里不需要 property_id —— 那是运行时候自己算的。
+    // 规范约束：同一 draw 内各槽替换的原贴图必须互不相同，冲突的直接退回裸整数。
+    if (asV11 && g_textureSlots) {
+        map<string,int> slotOf;   // slot id -> textures[] 索引
+        set<string> usedOrig;
+        size_t di = 0;
+        for (auto* mesh = jmeshes->child; mesh; mesh = mesh->next) {
+            auto* draws = get(mesh, "draws");
+            for (auto* d = draws ? draws->child : nullptr; d && di < drawSlots.size(); d = d->next, ++di) {
+                if (drawSlots[di].empty()) continue;
+                cJSON* refs = jarr();
+                for (auto& kv : drawSlots[di]) {
+                    const string& sid = kv.first;
+                    const int ti = kv.second;
+                    if (slotOf.count(sid)) continue;
+                    auto* t = cJSON_GetArrayItem(jtextures, ti);
+                    const string orig = t ? jstr(t, "original_name") : string();
+                    if (orig.empty() || usedOrig.count(orig)) continue;
+                    usedOrig.insert(orig);
+                    slotOf[sid] = ti;
+                    cJSON* r = obj(nullptr);
+                    cJSON_AddStringToObject(r, "slot", sid.c_str());
+                    jadd(refs, r);
+                }
+                if (cJSON_GetArraySize(refs) > 0) {
+                    cJSON_DeleteItemFromObject(d, "textures");
+                    cJSON_AddItemToObject(d, "textures", refs);
+                } else cJSON_Delete(refs);
+            }
+        }
+        if (!slotOf.empty()) {
+            cJSON* jslots = jarr();
+            for (auto& kv : slotOf) {
+                cJSON* s = obj(nullptr);
+                cJSON_AddStringToObject(s, "id", kv.first.c_str());
+                cJSON* cands = jarr();
+                cJSON* c = obj(nullptr);
+                cJSON_AddNumberToObject(c, "texture", kv.second);
+                jadd(cands, c);
+                cJSON_AddItemToObject(s, "candidates", cands);
+                jadd(jslots, s);
+            }
+            cJSON_AddItemToObject(mroot, "texture_slots", jslots);
+            jadd(caps, jstrv("texture-slots"));
+            cout << "texture_slots: " << cJSON_GetArraySize(jslots) << " 个槽（按属性名）\n";
+        }
     }
     char* json = cJSON_PrintUnformatted(mroot); if (!json) throw runtime_error("manifest serialize failed");
     vector<uint8_t> manifest((uint8_t*)json, (uint8_t*)json + strlen(json)); free(json);
@@ -3113,6 +3186,7 @@ int main(int argc, char** argv) {
             else if (a == "--legacy-auto") legacyAuto = true;
             else if (a == "--texture-fingerprint") g_textureFingerprint = true;
             else if (a == "--texture-compress") g_textureCompress = true;
+            else if (a == "--texture-slots") g_textureSlots = true;
             else if (a == "--auto-entries") g_autoEntries = true;
             else if (a == "--option-report" && i + 1 < argc) g_optionReport = argv[++i];
             else if (a == "--emit-options") g_emitOptions = true;
