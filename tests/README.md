@@ -26,6 +26,7 @@ tests/bc_integration_test.sh        # fixture BC2→BC1/BC3，normal→BC5
 tests/bc_mask_test.sh               # fixture --mask-texture，mask→BC4（8 字节/块）
 tests/eff_overrides_test.sh         # fixture-eff-overrides，真实 BEM 1.5
 tests/rabbitfx_binding_test.sh      # fixture --rabbitfx，slot→catalog 贴图名
+tests/robustness_test.sh           # 畸形输入：明确报错/跳过，不崩溃（SEGV/abort）
 ```
 
 - 样本路径/校验器可通过 `ROOT`、`C4`、`CAT`、`BEM`、`SAMPLE`、`CHAR` 覆盖；
