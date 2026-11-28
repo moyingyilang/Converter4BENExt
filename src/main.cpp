@@ -1933,6 +1933,9 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
         if (cJSON_IsObject(cat.textures)) for (auto* t = cat.textures->child; t; t = t->next) {
             auto nm = get(t, "name"); if (cJSON_IsString(nm)) texName[lower(string(t->string))] = nm->valuestring;
         }
+        if (texName.empty())
+            cerr << "texture skip: catalog has no textures table for " << cat.character
+                 << " (EFMI/RabbitFX slots need original_name; await a catalog textures backfill)\n";
         struct TexRes { string name; Dds dds; };
         map<string, TexRes> texRes;
         // RabbitFX：纹理走自己的命名空间，资源段是 [ResourceTextureN]（无下划线），
