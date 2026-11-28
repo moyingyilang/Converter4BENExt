@@ -42,6 +42,8 @@ make            # -> build/c4ben
 ./build/c4ben convert <mod> --catalog <catalog> --option-report options.json --out <输出.bem>
 # 直接输出 BEM 1.1（option_groups + component_rules，保留 KeySwap 多外观）
 ./build/c4ben convert <mod> --catalog <catalog> --emit-options --out <输出.bem>
+# opt-in：RGBA32/BC2 压缩成 BC1/BC3（默认仍 RGBA32）
+./build/c4ben convert <mod> --catalog <catalog> --texture-compress --out <输出.bem>
 ```
 
 - `<mod目录>` 需要有 `mod.ini`；也可直接传 `.zip` / `.rar` / `.7z`，包内允许带一层目录，多处 `mod.ini` 会报歧义。

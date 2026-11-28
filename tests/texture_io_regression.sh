@@ -21,6 +21,7 @@ run_case(){
 }
 run_case si-7z "$ROOT/.work/bem-mods3/732494_si_v10_ca9ce.7z" 14 --auto-entries
 run_case yif-eff3 "$ROOT/.work/bem-mods3/745092_yif.zip" 4 --auto-entries
+run_case si-bc "$ROOT/.work/bem-mods3/732494_si_v10_ca9ce.7z" 14 --auto-entries --texture-compress
 run_case argent-rabbitfx "$ROOT/.work/bem-mods3/744828_argent_flow.rar" 6 \
   --character chr_0037_minghe --auto-entries --emit-options
 echo "SUMMARY pass=$pass fail=$fail skip=$skip"

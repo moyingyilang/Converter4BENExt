@@ -33,7 +33,8 @@
 | 输入 | 状态 | 输出 |
 |---|---|---|
 | DDS BC1 / BC3 / BC4 / BC5 / BC7 | ✅ | 原生 BEM 格式（10/12/26/27/25） |
-| DDS BC2 / DXT3 | ✅ | 解码为 RGBA32（BEM 运行时不接受 BC2） |
+| DDS BC2 / DXT3 | ✅ | 解码为 RGBA32；加 `--texture-compress` 可重编码为 BC3/BC1（BEM 不接受 BC2） |
+| TGA/PNG 的 BC 压缩 | ✅（opt-in `--texture-compress`） | 无 alpha → BC1；有 alpha → BC3；纯标量编码器，arm64 可用 |
 | DDS RGBA8 / BGRA8（DXGI 28/87） | ✅ | RGBA32（BGRA 自动换序） |
 | DDS BC6H | ❌ | HDR 无法无损装进 8-bit RGBA32；明确拒绝 |
 | TGA / PNG / JPG | ✅ | RGBA32，mips=1；sRGB 由槽位/文件名推断 |

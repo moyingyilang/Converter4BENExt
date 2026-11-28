@@ -27,6 +27,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
 #include "stb_image.h"
+#include "bc_encode.h"
 #include "third_party/cJSON.h"
 #include "c4ben.h"
 
@@ -35,6 +36,7 @@ static bool g_textureFingerprint = false;
 static bool g_autoEntries = false; // --auto-entries：布局-only catalog 的唯一指纹锚定
 static string g_optionReport;      // --option-report <file>：EFMI 选项/组件条件导出
 static bool g_emitOptions = false; // --emit-options：输出 BEM 1.1 option_groups
+static bool g_textureCompress = false; // --texture-compress：RGBA32 -> BC1/BC3
 // 显式开启的旧布局兼容：源 VB 缺少目标尾部顶点属性时补零，而不是直接拒绝。
 // 只允许 source stride < target stride；不做删除/重排，避免静默猜布局。
 static bool g_compatLayout = false;
@@ -208,6 +210,26 @@ static Dds readDds(const string& path) {
     return d;
 }
 
+// --texture-compress：把 BEM fmt4 (RGBA32) 编码成 BC1/BC3。可选、默认关闭；
+// 不改变 DDS 原生 BC1/3/4/5/7 直通路径。arm64 纯标量实现。
+static void applyTextureCompression(Dds& d) {
+    if (!g_textureCompress || d.fmt != 4 || d.data.empty()) return;
+    bool hasAlpha = false;
+    for (size_t i = 3; i < d.data.size(); i += 4)
+        if (d.data[i] != 255) { hasAlpha = true; break; }
+    vector<uint8_t> out;
+    const size_t before = d.data.size();
+    try {
+        int fmt = c4ben_bc::encodeRgba(d.data, d.w, d.h, d.mips, hasAlpha, out);
+        d.data.swap(out);
+        d.fmt = fmt;
+        cerr << "texture compress: " << (hasAlpha ? "BC3" : "BC1")
+             << " " << before << " -> " << d.data.size() << " bytes\n";
+    } catch (exception& e) {
+        cerr << "texture compress skipped: " << e.what() << "\n";
+    }
+}
+
 static bool linearTextureName(const string& name) {
     string s = lower(name);
     for (const char* token : {"_n", "normal", "_nm", "_mask", "rough", "metal", "_mra", "_orm", "_p"}) {
@@ -224,6 +246,7 @@ static Dds readTexture(const string& path, const string& hint) {
         Dds d = readDds(path);
         // legacy DDS 头不带色彩空间；沿用与 PNG/TGA 相同的历史启发式补齐。
         if (!d.srgbKnown) d.srgb = !linearTextureName(hint.empty() ? path : hint);
+        applyTextureCompression(d);
         return d;
     }
     int w = 0, h = 0, n = 0;
@@ -233,6 +256,7 @@ static Dds readTexture(const string& path, const string& hint) {
     d.srgb = !linearTextureName(hint.empty() ? path : hint);
     d.data.assign(pixels, pixels + (size_t)w * h * 4);
     stbi_image_free(pixels);
+    applyTextureCompression(d);
     return d;
 }
 
@@ -2822,6 +2846,7 @@ int main(int argc, char** argv) {
             else if (a == "--allow-review") allowReview = true;
             else if (a == "--legacy-auto") legacyAuto = true;
             else if (a == "--texture-fingerprint") g_textureFingerprint = true;
+            else if (a == "--texture-compress") g_textureCompress = true;
             else if (a == "--auto-entries") g_autoEntries = true;
             else if (a == "--option-report" && i + 1 < argc) g_optionReport = argv[++i];
             else if (a == "--emit-options") g_emitOptions = true;
