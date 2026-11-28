@@ -612,7 +612,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     if (format != "3") throw runtime_error("not an EFF format-3 package (format=" + format + ")");
 
     // resources
-    struct EffTex { string dds, asset; };
+    struct EffTex { string dds, asset; bool srgb = false; };
     struct EffMat { string asset; vector<pair<string,string>> slots; };
     map<string, EffTex> tex;
     map<string, EffMat> mat;
@@ -625,6 +625,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
         map<string,string> d; effSection(ini, s, d);
         if (s.rfind("Texture", 0) == 0 && s.rfind("TextureOverride", 0) != 0) {
             auto dds = effKey(ini, s, "dds"), asset = effKey(ini, s, "source.asset");
+            bool srgbHint = false, srgbKnown = false;
             if (asset.empty()) {
                 // Most EFF packages declare only source.path; the catalog key is the
                 // basename without extension (e.g. .../t_actor_laevat_body_01_d.tga).
@@ -637,7 +638,27 @@ static int convertEff(const string& dir, const string& catDir, const string& out
                     if (dot != string::npos) asset.resize(dot);
                 }
             }
-            if (!dds.empty()) tex[s] = {dds, asset};
+            if (asset.empty()) {
+                // EFF3 另一种写法：身份直接写在段名里
+                // [Texture<asset>_<12位hash>_srgb|linear]
+                string sec = s.substr(7); // 去掉 "Texture"
+                for (const char* sfx : {"_srgb", "_linear"}) {
+                    const size_t n = strlen(sfx);
+                    if (sec.size() > n && sec.compare(sec.size() - n, n, sfx) == 0) {
+                        srgbHint = (string(sfx) == "_srgb");
+                        srgbKnown = true;
+                        sec.resize(sec.size() - n);
+                        break;
+                    }
+                }
+                const size_t us = sec.find_last_of('_');
+                if (us != string::npos && us > 0 && sec.size() - us - 1 == 12 &&
+                    sec.find_first_not_of("0123456789abcdefABCDEF", us + 1) == string::npos) {
+                    sec.resize(us);
+                    if (!sec.empty()) asset = sec;
+                }
+            }
+            if (!dds.empty()) tex[s] = {dds, asset, srgbKnown ? srgbHint : false};
         } else if (s.rfind("Material", 0) == 0 && s.rfind("MaterialTrack", 0) != 0) {
             EffMat m; m.asset = effKey(ini, s, "source.asset");
             for (auto& kv : d) if (kv.first.rfind("texture.", 0) == 0) m.slots.push_back({kv.first, kv.second});
@@ -666,10 +687,11 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     auto addPayload = [&](vector<uint8_t> b) { payloads.push_back(std::move(b)); return (int)payloads.size() - 1; };
     cJSON* jtextures = jarr();
     map<string,int> texIndex; // original_name -> textures[] index
-    auto addTexture = [&](const string& asset, const string& ddsPath) -> int {
+    auto addTexture = [&](const string& asset, const string& ddsPath, bool srgbOverride = false) -> int {
         auto it = texIndex.find(asset); if (it != texIndex.end()) return it->second;
         Dds d;
         try { d = readTexture(ddsPath, asset); } catch (exception& e) { cerr << "texture skip " << asset << ": " << e.what() << "\n"; return -1; }
+        if (srgbOverride) d.srgb = true; // EFF3 段名 _srgb 后缀是权威来源
         string original;
         if (!effCatalogTexture(cat, asset, original)) {
             if (!g_textureFingerprint) { cerr << "texture skip " << asset << ": no catalog identity\n"; return -1; }
@@ -748,7 +770,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
             for (auto& [prop, ts] : em.slots) {
                 auto it = tex.find(ts); if (it == tex.end()) continue;
                 auto tpath = it->second.dds; if (tpath.empty()) continue;
-                int ti = addTexture(it->second.asset, dir + "/" + tpath);
+                int ti = addTexture(it->second.asset, dir + "/" + tpath, it->second.srgb);
                 if (ti >= 0 && !seenTex.count(ti)) { seenTex.insert(ti); jadd(jtexIds, jnum(ti)); }
             }
             // 骨骼 palette
