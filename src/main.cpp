@@ -1,6 +1,7 @@
 // Converter4BENeXt —— EFMI/EFF -> BEN BEM 迁移工具（C++17，无 .NET / Python）
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -1908,6 +1909,140 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
         return 0;
 }
 
+// ============================ 压缩包输入 ============================
+// mod 包在发布时基本都是 .zip/.7z/.rar。这里先支持 .zip（zlib 已链接，无新依赖）：
+// 解压到临时目录后走原有流程。解压目录会在进程结束时清理。
+static uint32_t zr16(const vector<uint8_t>& b, size_t o) { return (uint32_t)b[o] | ((uint32_t)b[o + 1] << 8); }
+static uint32_t zr32(const vector<uint8_t>& b, size_t o) {
+    return (uint32_t)b[o] | ((uint32_t)b[o + 1] << 8) | ((uint32_t)b[o + 2] << 16) | ((uint32_t)b[o + 3] << 24);
+}
+
+static bool looksLikeZip(const string& path, const vector<uint8_t>& head) {
+    if (head.size() >= 4 && head[0] == 'P' && head[1] == 'K' && head[2] == 3 && head[3] == 4) return true;
+    const string p = lower(path);
+    return p.size() > 4 && p.compare(p.size() - 4, 4, ".zip") == 0;
+}
+
+static vector<uint8_t> inflateRaw(const uint8_t* src, size_t srcLen, size_t expect) {
+    vector<uint8_t> out(expect ? expect : 1);
+    z_stream zs{};
+    if (inflateInit2(&zs, -MAX_WBITS) != Z_OK) throw runtime_error("zlib inflateInit failed");
+    zs.next_in = const_cast<Bytef*>(src); zs.avail_in = (uInt)srcLen;
+    zs.next_out = out.data(); zs.avail_out = (uInt)out.size();
+    int rc = inflate(&zs, Z_FINISH);
+    const size_t produced = out.size() - zs.avail_out;
+    inflateEnd(&zs);
+    if (rc != Z_STREAM_END && rc != Z_OK) throw runtime_error("zip deflate stream corrupt");
+    out.resize(produced);
+    return out;
+}
+
+// 解压 zip 到 outDir；返回包含 mod.ini 的最浅目录（相对 outDir），找不到返回空。
+static string unzipTo(const string& zipPath, const string& outDir) {
+    const auto b = readFile(zipPath);
+    if (b.size() < 22) throw runtime_error("zip too small: " + zipPath);
+
+    // End of central directory：在最后 64KB 内回扫
+    size_t eocd = string::npos;
+    const size_t scanFrom = b.size() > 65558 ? b.size() - 65558 : 0;
+    for (size_t i = b.size() - 22 + 1; i-- > scanFrom;) {
+        if (zr32(b, i) == 0x06054b50u) { eocd = i; break; }
+    }
+    if (eocd == string::npos) throw runtime_error("zip: end-of-central-directory not found: " + zipPath);
+    const uint32_t count = zr16(b, eocd + 10);
+    const uint32_t cdOff = zr32(b, eocd + 16);
+    if (cdOff >= b.size()) throw runtime_error("zip: bad central directory offset");
+
+    string modIniDir;
+    vector<string> modIniHits;
+    size_t p = cdOff;
+    for (uint32_t i = 0; i < count; i++) {
+        if (p + 46 > b.size() || zr32(b, p) != 0x02014b50u) throw runtime_error("zip: bad central directory entry");
+        const uint32_t method = zr16(b, p + 10);
+        const uint32_t csize = zr32(b, p + 20);
+        const uint32_t usize = zr32(b, p + 24);
+        const uint32_t nlen = zr16(b, p + 28);
+        const uint32_t elen = zr16(b, p + 30);
+        const uint32_t clen = zr16(b, p + 32);
+        const uint32_t lho = zr32(b, p + 42);
+        const string name(b.begin() + p + 46, b.begin() + p + 46 + nlen);
+        p += 46 + nlen + elen + clen;
+
+        if (!name.empty() && (name.back() == '/' || name.back() == '\\')) continue; // 目录项
+        // 与 BEN 的 Source 一致：整包内路径必须相对，不允许越界或盘符
+        if (name.find("..") != string::npos) throw runtime_error("zip: refusing entry with '..': " + name);
+        if (!name.empty() && (name[0] == '/' || name[0] == '\\')) throw runtime_error("zip: refusing absolute entry: " + name);
+        if (name.size() > 1 && name[1] == ':') throw runtime_error("zip: refusing drive-letter entry: " + name);
+        if (lho + 30 > b.size() || zr32(b, lho) != 0x04034b50u) throw runtime_error("zip: bad local header for " + name);
+        const uint32_t lnlen = zr16(b, lho + 26), lelen = zr16(b, lho + 28);
+        const size_t dataOff = lho + 30 + lnlen + lelen;
+        if (dataOff + csize > b.size()) throw runtime_error("zip: truncated data for " + name);
+
+        vector<uint8_t> data;
+        if (method == 0) data.assign(b.begin() + dataOff, b.begin() + dataOff + csize);
+        else if (method == 8) data = inflateRaw(b.data() + dataOff, csize, usize);
+        else throw runtime_error("zip: unsupported compression method " + to_string(method) + " for " + name);
+
+        const string dest = outDir + "/" + name;
+        fs::create_directories(fs::path(dest).parent_path());
+        writeFile(dest, data);
+
+        // 只认精确的 mod.ini 文件名（DISABLED_mod.ini 不算），出现多处则报歧义
+        const string ln = lower(name);
+        if (ln.size() >= 7 && ln.compare(ln.size() - 7, 7, "mod.ini") == 0) {
+            const string base = name.substr(name.find_last_of('/') == string::npos ? 0 : name.find_last_of('/') + 1);
+            const string baseLower = lower(base);
+            if (baseLower == "mod.ini") {
+                modIniHits.push_back(name);
+                const string dir = name.substr(0, name.size() - base.size());
+                if (modIniDir.empty() || dir.size() < modIniDir.size()) modIniDir = dir;
+            }
+        }
+    }
+    if (modIniHits.size() > 1) {
+        string list;
+        for (size_t i = 0; i < modIniHits.size() && i < 8; i++) list += "\n  " + modIniHits[i];
+        throw runtime_error("zip: mod.ini 在包内有 " + to_string(modIniHits.size()) + " 处，无法确定目标包:" + list);
+    }
+    return modIniDir; // 可能是 ""（mod.ini 在根）
+}
+
+static string g_extractedRoot; // 进程结束前清理的解压目录
+
+static void cleanupExtracted() {
+    if (g_extractedRoot.empty()) return;
+    std::error_code ec;
+    fs::remove_all(g_extractedRoot, ec);
+}
+
+// 输入是压缩包时解压到临时目录，并把 dir 指向含 mod.ini 的根目录。
+// 语义与 BEN tools/CustomModel 的 Source 一致：目录与 .zip 直接读，
+// .rar/.7z 需要外部解包后端，这里明确拒绝而不是半读。
+static void resolveArchiveInput(string& dir) {
+    std::error_code ec;
+    if (!fs::is_regular_file(dir, ec)) return; // 普通目录，保持原行为
+    const string lowerPath = lower(dir);
+    auto endsWith = [&](const char* ext) {
+        const size_t n = strlen(ext);
+        return lowerPath.size() >= n && lowerPath.compare(lowerPath.size() - n, n, ext) == 0;
+    };
+    vector<uint8_t> head(8);
+    { ifstream f(dir, ios::binary); if (f) { f.read((char*)head.data(), (streamsize)head.size()); head.resize((size_t)f.gcount()); } }
+    if (!looksLikeZip(dir, head)) {
+        if (endsWith(".rar") || endsWith(".7z"))
+            throw runtime_error("ARCHIVE_BACKEND: 此发行版不含 RAR/7z 解压后端，请提供 .zip 或已解包的目录: " + dir);
+        throw runtime_error("source must be an EFMI mod folder or .zip: " + dir);
+    }
+
+    const string stamp = to_string((unsigned long long)chrono::steady_clock::now().time_since_epoch().count());
+    const string tmp = (fs::temp_directory_path() / ("c4ben-" + stamp)).string();
+    fs::create_directories(tmp);
+    g_extractedRoot = tmp;
+    const string sub = unzipTo(dir, tmp);
+    dir = sub.empty() ? tmp : (tmp + "/" + sub);
+    cerr << "extracted " << dir << "\n";
+}
+
 // ============================ 合成 EFMI 固定件 ============================
 // 回归用：按 catalog 的真实 hash 生成最小 EFMI 包。几何是程序生成的网格，贴图是
 // 常量色 BC 块，不读取任何游戏资源，可在 CI 里重复生成。
@@ -2050,6 +2185,7 @@ static int genFixture(const string& outDir, const string& catDir, const string& 
 
 #ifndef C4BEN_NO_MAIN
 int main(int argc, char** argv) {
+    atexit(cleanupExtracted);
     try {
         if (argc < 2 || (string(argv[1]) != "convert" && string(argv[1]) != "inspect-legacy" &&
                          string(argv[1]) != "map" && string(argv[1]) != "fixture")) {
@@ -2082,6 +2218,7 @@ int main(int argc, char** argv) {
                 else dir = a;
             }
             if (dir.empty() || catDir.empty()) { cerr << "missing mod/catalog\n"; return 2; }
+            resolveArchiveInput(dir);
             return legacyInspect(dir, catDir, character, outPath);
         }
         string dir, catDir, out, profile, character, skeletonPath;
@@ -2106,6 +2243,7 @@ int main(int argc, char** argv) {
             else dir = a;
         }
         if (dir.empty() || catDir.empty() || out.empty()) { cerr << "missing args\n"; return 2; }
+        resolveArchiveInput(dir);
         if (!skeletonPath.empty()) loadSkeletonTable(skeletonPath);
         if (!character.empty()) g_forceCharacter = character;
         if (!profile.empty()) return convertLegacyProfile(dir, catDir, profile, out, allowReview);
