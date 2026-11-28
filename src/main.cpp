@@ -1,5 +1,6 @@
 // Converter4BENeXt —— EFMI/EFF -> BEN BEM 迁移工具（C++17，无 .NET / Python）
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -88,8 +89,35 @@ static vector<uint8_t> readFile(const string& p) {
 }
 
 static string lower(string s);
-struct Dds { int w, h, mips, fmt; bool srgb; vector<uint8_t> data; };
+// srgbKnown：只有 DX10 头自带色彩空间才算已知。legacy fourCC（DXT1/3/5）没有这个
+// 字段，必须回退到贴图名启发式，不能默认按线性输出，否则 albedo 会被标成 linear。
+struct Dds { int w, h, mips, fmt; bool srgb; bool srgbKnown = false; vector<uint8_t> data; };
+
+// 某个 BEM 纹理工况的期望字节数；返回 0 表示格式未知，跳过校验。
+static size_t expectedTextureBytes(int fmt, int w, int h, int mips) {
+    if (w <= 0 || h <= 0 || mips <= 0) return 0;
+    size_t total = 0;
+    for (int m = 0; m < mips; m++) {
+        const int mw = std::max(1, w >> m), mh = std::max(1, h >> m);
+        const size_t blocks = (size_t)((mw + 3) / 4) * (size_t)((mh + 3) / 4);
+        switch (fmt) {
+            case 10: case 26: total += blocks * 8; break;            // BC1 / BC4
+            case 12: case 25: case 27: total += blocks * 16; break;  // BC3 / BC7 / BC5
+            case 4: total += (size_t)mw * (size_t)mh * 4; break;     // RGBA32
+            default: return 0;
+        }
+    }
+    return total;
+}
 static uint32_t rd32(const vector<uint8_t>& b, size_t o) { return (uint32_t)b[o] | ((uint32_t)b[o+1] << 8) | ((uint32_t)b[o+2] << 16) | ((uint32_t)b[o+3] << 24); }
+
+static void checkDdsPayload(const Dds& d, const string& path) {
+    const size_t need = expectedTextureBytes(d.fmt, d.w, d.h, d.mips);
+    if (need && d.data.size() < need) {
+        throw runtime_error("truncated DDS payload: " + path + " has " + to_string(d.data.size()) +
+                            " bytes, format needs " + to_string(need));
+    }
+}
 
 // Decode a BC2/DXT3 chain to RGBA32: the BEM runtime does not accept BC2, so the
 // converter expands it instead of dropping the texture.
@@ -134,6 +162,7 @@ static Dds readDds(const string& path) {
     size_t off = 128; int code = -1;
     if (fourcc == "DX10") {
         code = rd32(b, 128); off = 148;
+        d.srgbKnown = true; // DX10 的格式码已区分 UNORM / UNORM_SRGB
         const uint32_t dimension = rd32(b, 132), misc = rd32(b, 136), arraySize = rd32(b, 140);
         if (dimension == 4) throw runtime_error("DDS volume texture is not representable as BEM 2D texture: " + path);
         if (dimension == 5) throw runtime_error("DDS cubemap is not representable as BEM 2D texture: " + path);
@@ -159,12 +188,14 @@ static Dds readDds(const string& path) {
             d.fmt = 4; d.srgb = false;
             d.data.assign(b.begin() + off, b.end());
             if (code == 87) bgraToRgba(d.data);
+            checkDdsPayload(d, path);
             return d;
         }
         default: throw runtime_error("unsupported DDS format " + to_string(code) + " in " + path);
     }
     if (b.size() < off) throw runtime_error("truncated DDS " + path);
     d.data.assign(b.begin() + off, b.end());
+    checkDdsPayload(d, path);
     return d;
 }
 
@@ -180,7 +211,12 @@ static bool linearTextureName(const string& name) {
 // RGBA32, which BEM accepts. sRGB is inferred from the slot/asset name.
 static Dds readTexture(const string& path, const string& hint) {
     string p = lower(path);
-    if (p.size() >= 4 && p.substr(p.size() - 4) == ".dds") return readDds(path);
+    if (p.size() >= 4 && p.substr(p.size() - 4) == ".dds") {
+        Dds d = readDds(path);
+        // legacy DDS 头不带色彩空间；沿用与 PNG/TGA 相同的历史启发式补齐。
+        if (!d.srgbKnown) d.srgb = !linearTextureName(hint.empty() ? path : hint);
+        return d;
+    }
     int w = 0, h = 0, n = 0;
     stbi_uc* pixels = stbi_load(path.c_str(), &w, &h, &n, 4);
     if (!pixels) throw runtime_error("not DDS and image decode failed: " + path);
@@ -1872,14 +1908,169 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
         return 0;
 }
 
+// ============================ 合成 EFMI 固定件 ============================
+// 回归用：按 catalog 的真实 hash 生成最小 EFMI 包。几何是程序生成的网格，贴图是
+// 常量色 BC 块，不读取任何游戏资源，可在 CI 里重复生成。
+static void fxU32(vector<uint8_t>& o, uint32_t v) {
+    for (int i = 0; i < 4; i++) o.push_back((uint8_t)((v >> (8 * i)) & 255));
+}
+
+static vector<uint8_t> fxDds(const string& fam, int w, int h) {
+    vector<uint8_t> o;
+    const size_t blocks = (size_t)((w + 3) / 4) * (size_t)((h + 3) / 4);
+    const bool dx10 = (fam == "BC5" || fam == "BC7");
+    o.push_back('D'); o.push_back('D'); o.push_back('S'); o.push_back(' ');
+    fxU32(o, 124); fxU32(o, 0x1u | 0x2u | 0x4u | 0x1000u | 0x80000u);
+    fxU32(o, (uint32_t)h); fxU32(o, (uint32_t)w); fxU32(o, 0); fxU32(o, 0); fxU32(o, 1);
+    for (int i = 0; i < 11; i++) fxU32(o, 0);
+    fxU32(o, 32); fxU32(o, 4);
+    const string four = fam == "BC1" ? "DXT1" : fam == "BC2" ? "DXT3" : fam == "BC3" ? "DXT5" : "DX10";
+    o.insert(o.end(), four.begin(), four.end());
+    for (int i = 0; i < 5; i++) fxU32(o, 0);
+    fxU32(o, 0x1000); for (int i = 0; i < 4; i++) fxU32(o, 0);
+    if (dx10) { fxU32(o, fam == "BC5" ? 83u : 98u); fxU32(o, 3); fxU32(o, 0); fxU32(o, 1); fxU32(o, 0); }
+
+    const uint32_t color = ((200u >> 3) << 11) | ((120u >> 2) << 5) | (60u >> 3);
+    const uint32_t cpair = color | (color << 16);
+    for (size_t i = 0; i < blocks; i++) {
+        if (fam == "BC1") { fxU32(o, cpair); fxU32(o, 0); }
+        else if (fam == "BC2" || fam == "BC3") { fxU32(o, 0xFFFFFFFFu); fxU32(o, 0xFFFFFFFFu); fxU32(o, cpair); fxU32(o, 0); }
+        else if (fam == "BC5") { for (int k = 0; k < 4; k++) fxU32(o, 0xFFFFFFFFu); }
+        else { fxU32(o, 0x40u); fxU32(o, 0); fxU32(o, 0); fxU32(o, 0); }
+    }
+    return o;
+}
+
+static int genFixture(const string& outDir, const string& catDir, const string& character) {
+    Cat cat = loadCatalogByCharacter(catDir, character);
+    if (!cJSON_IsObject(cat.entries)) throw runtime_error("catalog has no entries map");
+    string compHash; int cid = -1;
+    for (auto* e = cat.entries->child; e; e = e->next) {
+        if (!e->string) continue;
+        compHash = lower(string(e->string)); cid = (int)e->valueint; break;
+    }
+    if (cid < 0 || compHash.empty()) throw runtime_error("catalog entries is empty");
+    cJSON* comp = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
+    if (!comp) throw runtime_error("catalog component " + to_string(cid) + " missing");
+    const int vcount = jint(comp, "vertex_count");
+    int icount = 0;
+    cJSON* subs = get(comp, "submeshes");
+    if (cJSON_IsArray(subs) && cJSON_GetArraySize(subs) > 0) icount = jint(cJSON_GetArrayItem(subs, 0), "index_count");
+    if (vcount <= 0 || icount <= 0) throw runtime_error("component has no usable geometry counts");
+
+    vector<int> strides;
+    cJSON* streams = get(comp, "source_streams");
+    if (cJSON_IsArray(streams)) for (auto* st = streams->child; st; st = st->next) {
+        int s = 0; cJSON* sem = get(st, "semantics");
+        if (cJSON_IsArray(sem)) for (auto* q = sem->child; q; q = q->next) s += jint(q, "stride");
+        strides.push_back(s);
+    }
+    while (strides.size() < 3) strides.push_back(strides.empty() ? 16 : 12);
+
+    // 组件实际绑定的贴图名，反查 catalog 里的 hash
+    map<string, string> nameToHash;
+    if (cJSON_IsObject(cat.textures)) for (auto* t = cat.textures->child; t; t = t->next) {
+        const string nm = jstr(t, "name");
+        if (!nm.empty() && !nameToHash.count(nm)) nameToHash[nm] = lower(string(t->string));
+    }
+    vector<string> bound;
+    cJSON* mats = get(comp, "material_textures");
+    if (cJSON_IsArray(mats)) for (auto* grp = mats->child; grp; grp = grp->next) {
+        if (!cJSON_IsArray(grp)) continue;
+        for (auto* nm = grp->child; nm; nm = nm->next) {
+            if (!cJSON_IsString(nm)) continue;
+            auto it = nameToHash.find(nm->valuestring);
+            if (it != nameToHash.end() && find(bound.begin(), bound.end(), it->second) == bound.end()) bound.push_back(it->second);
+        }
+    }
+    if (bound.empty() && cJSON_IsObject(cat.textures))
+        for (auto* t = cat.textures->child; t && bound.size() < 5; t = t->next) bound.push_back(lower(string(t->string)));
+
+    vector<uint8_t> vb0, vb1, vb2, ib;
+    for (int i = 0; i < vcount; i++) {
+        const float x = (float)(i % 64) * 0.1f, y = (float)((i / 64) % 64) * 0.1f;
+        const float p3[3] = {x, y, 0.0f};
+        vb0.insert(vb0.end(), (const uint8_t*)p3, (const uint8_t*)p3 + 12);
+        fxU32(vb0, 0); // ENCODEDDATA
+        const float uv[2] = {(float)(i % 64) / 64.0f, (float)((i / 64) % 64) / 64.0f};
+        vb1.insert(vb1.end(), (const uint8_t*)uv, (const uint8_t*)uv + 8);
+        for (int k = 0; k < 4; k++) vb1.push_back(255); // COLOR
+        vb2.push_back(255); vb2.push_back(255);         // weight0 = 65535
+        for (int k = 0; k < 6; k++) vb2.push_back(0);
+        for (int k = 0; k < 4; k++) vb2.push_back(0);   // bone indices
+    }
+    for (int i = 0; i < icount; i++) {
+        const uint16_t v = (uint16_t)(i % vcount);
+        ib.push_back((uint8_t)(v & 255)); ib.push_back((uint8_t)(v >> 8));
+    }
+
+    fs::create_directories(outDir + "/Meshes");
+    fs::create_directories(outDir + "/Textures");
+    writeFile(outDir + "/Meshes/vb0.buf", vb0);
+    writeFile(outDir + "/Meshes/vb1.buf", vb1);
+    writeFile(outDir + "/Meshes/vb2.buf", vb2);
+    writeFile(outDir + "/Meshes/ib.buf", ib);
+
+    const char* fams[5] = {"BC1", "BC2", "BC3", "BC5", "BC7"};
+    vector<pair<string, string>> texOut;
+    for (size_t i = 0; i < bound.size(); i++) {
+        const string fam = fams[i % 5];
+        writeFile(outDir + "/Textures/" + bound[i] + ".dds", fxDds(fam, 64, 64));
+        texOut.push_back(make_pair(bound[i], fam));
+    }
+
+    string ini;
+    ini += "[Mod]\nnamespace = c4ben-fixture\n\n";
+    ini += "[TextureOverride_EntryPoint_Component" + to_string(cid) + "]\n";
+    ini += "hash = " + compHash + "\n";
+    ini += "match_first_index = 0\n";
+    ini += "match_index_count = " + to_string(icount) + "\n";
+    ini += "drawindexed = " + to_string(icount) + ", 0, 0\n\n";
+    const char* names[3] = {"VB0", "VB1", "VB2"};
+    for (int i = 0; i < 3; i++) {
+        ini += string("[Resource_Component") + to_string(cid) + "_" + names[i] + "]\n";
+        ini += "stride = " + to_string(strides[i]) + "\n";
+        ini += string("filename = Meshes/") + lower(string(names[i])) + ".buf\n\n";
+    }
+    ini += "[Resource_Component" + to_string(cid) + "_IB]\nstride = 2\nfilename = Meshes/ib.buf\n\n";
+    for (size_t i = 0; i < texOut.size(); i++) {
+        ini += "[Resource_Texture_" + texOut[i].first + "]\nfilename = Textures/" + texOut[i].first + ".dds\n\n";
+        ini += "[TextureOverride_Texture_" + texOut[i].first + "]\nhash = " + texOut[i].first +
+               "\nps-t0 = Resource_Texture_" + texOut[i].first + "\n\n";
+    }
+    writeFile(outDir + "/mod.ini", vector<uint8_t>(ini.begin(), ini.end()));
+
+    cout << "fixture written to " << outDir << ": component=" << cid << " hash=" << compHash
+         << " v=" << vcount << " idx=" << icount << " textures=" << texOut.size() << "\n";
+    for (size_t i = 0; i < texOut.size(); i++) cout << "  " << texOut[i].first << " " << texOut[i].second << "\n";
+    cJSON_Delete(cat.root);
+    return 0;
+}
+
+
 #ifndef C4BEN_NO_MAIN
 int main(int argc, char** argv) {
     try {
-        if (argc < 2 || (string(argv[1]) != "convert" && string(argv[1]) != "inspect-legacy" && string(argv[1]) != "map")) {
+        if (argc < 2 || (string(argv[1]) != "convert" && string(argv[1]) != "inspect-legacy" &&
+                         string(argv[1]) != "map" && string(argv[1]) != "fixture")) {
             cerr << "usage: c4ben convert <mod-dir> --catalog <catalog-dir> --out <out.bem>\n"
                     "       c4ben inspect-legacy|map <old-mod-dir> --catalog <dir> --character <chr_...> [--out mapping.json]\n"
                     "       c4ben convert <old-mod-dir> --catalog <dir> --character <chr_...> --legacy-auto --out <out.bem>\n"
+                    "       c4ben fixture <out-dir> --catalog <dir> --character <chr_...>   (合成回归包，不含游戏资源)\n"
                     "       add --texture-fingerprint to map hash-drifted DDS by unique descriptor\n"; return 2;
+        }
+        if (string(argv[1]) == "fixture") {
+            string outDir, catDir, character;
+            for (int i = 2; i < argc; i++) {
+                string a = argv[i];
+                if (a == "--catalog" && i + 1 < argc) catDir = argv[++i];
+                else if (a == "--character" && i + 1 < argc) character = argv[++i];
+                else outDir = a;
+            }
+            if (outDir.empty() || catDir.empty() || character.empty()) {
+                cerr << "usage: c4ben fixture <out-dir> --catalog <dir> --character <chr_...>\n"; return 2;
+            }
+            return genFixture(outDir, catDir, character);
         }
         if (string(argv[1]) == "inspect-legacy" || string(argv[1]) == "map") {
             string dir, catDir, character, outPath;
