@@ -1668,6 +1668,38 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
         }
         struct TexRes { string name; Dds dds; };
         map<string, TexRes> texRes;
+        // RabbitFX：纹理走自己的命名空间，资源段是 [ResourceTextureN]（无下划线），
+        // 且把 catalog 用的 8 位 hash 编码在文件名里：
+        //   filename = Textures/c=0-1 f=BC7_UNORM t=908140d5 d=8cb4....dds
+        // 组件里用 `Resource\RabbitFX\<Slot> = ref ResourceTextureN` 绑定。
+        // 这里先按 hash 解析出来，绑定仍复用下面按 catalog 名匹配的通用逻辑。
+        auto rabbitFxHash = [](const string& filename) -> string {
+            const string key = "t=";
+            const size_t at = filename.find(key);
+            if (at == string::npos) return "";
+            size_t i = at + key.size(), n = 0;
+            while (i + n < filename.size() && n < 8 && isxdigit((unsigned char)filename[i + n])) n++;
+            return n == 8 ? lower(filename.substr(i, 8)) : string();
+        };
+        for (auto& s : ini.order) {
+            if (s.size() <= 15 || s.compare(0, 15, "ResourceTexture") != 0) continue;
+            const string suffix = s.substr(15);
+            if (suffix.empty() || suffix.find_first_not_of("0123456789") != string::npos) continue;
+            auto it = ini.sec[s].find("filename"); if (it == ini.sec[s].end()) continue;
+            const string hash = rabbitFxHash(it->second);
+            if (hash.empty()) continue;
+            auto tn = texName.find(hash);
+            try {
+                Dds d = readTexture(dir + "/" + it->second, tn != texName.end() ? tn->second : "");
+                string name = tn != texName.end() ? tn->second : "";
+                if (name.empty() && g_textureFingerprint) {
+                    name = catalogTextureByDescriptor(cat.textures, d.w, d.h, d.mips);
+                    if (!name.empty()) cout << "texture fingerprint: " << hash << " -> " << name << "\n";
+                }
+                if (name.empty()) continue;
+                texRes[hash] = {name, d};
+            } catch (exception& e) { cerr << "texture skip " << it->second << ": " << e.what() << "\n"; }
+        }
         for (auto& s : ini.order) {
             if (s.rfind("Resource_Texture", 0) != 0) continue;
             const string suffix = s.substr(strlen("Resource_Texture"));
@@ -1819,9 +1851,14 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             auto* comp = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
             cJSON* jattrs = jarr();
             int fsz[] = {4,2,1,1,2,2,1,1,2,2,4,4}; int offs[3] = {0,0,0};
-            for (auto* a = get(comp, "attributes")->child; a; a = a->next) {
+            // catalog 的 attributes 可能缺失（1.7.x 的 VFS 回填只给 components 布局），
+            // 直接解引用会崩；缺失时退化为不写 catalog 属性，仅保留下面强制补的两条。
+            cJSON* cattrs = get(comp, "attributes");
+            if (cJSON_IsArray(cattrs)) for (auto* a = cattrs->child; a; a = a->next) {
+                if (cJSON_GetArraySize(a) < 4) continue;
                 int sem = a->child->valueint, fmt = a->child->next->valueint, dim = a->child->next->next->valueint, stream = a->child->next->next->next->valueint;
-                if (stream >= 2) continue;
+                if (stream < 0 || stream > 2) continue;
+                if (fmt < 0 || fmt > 11) continue;
                 cJSON* x = jarr(); jadd(x, jnum(sem)); jadd(x, jnum(fmt)); jadd(x, jnum(dim)); jadd(x, jnum(stream)); jadd(x, jnum(offs[stream]));
                 jadd(jattrs, x); offs[stream] += fsz[fmt] * dim;
             }
@@ -1872,8 +1909,9 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             cJSON* jdraws = jarr(); cJSON* jd = obj(nullptr);
             cJSON_AddNumberToObject(jd, "start", 0); cJSON_AddNumberToObject(jd, "count", ni);
             cJSON_AddNumberToObject(jd, "material_component", cid); cJSON_AddNumberToObject(jd, "material_slot", 0);
-            auto* mats = get(comp, "materials"); auto* m0 = cJSON_GetArrayItem(mats, 0);
-            cJSON_AddStringToObject(jd, "material_name", m0 ? m0->valuestring : "M_unknown");
+            auto* mats = get(comp, "materials");
+            auto* m0 = cJSON_IsArray(mats) ? cJSON_GetArrayItem(mats, 0) : nullptr;
+            cJSON_AddStringToObject(jd, "material_name", (m0 && cJSON_IsString(m0)) ? m0->valuestring : "M_unknown");
             cJSON_AddItemToObject(jd, "textures", jtexIds); jadd(jdraws, jd);
             cJSON_AddItemToObject(jmesh, "draws", jdraws);
             meshIndex[cid] = cJSON_GetArraySize(jmeshes); jadd(jmeshes, jmesh);
