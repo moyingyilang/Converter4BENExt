@@ -1166,6 +1166,15 @@ static int convertEff(const string& dir, const string& catDir, const string& out
             }
         }
         if (!slotOf.empty()) {
+            // 运行时 ApplyTextureMask 按 original_name 逐字匹配游戏材质的纹理名，
+            // 匹配不上会直接报 “Texture name pin missing”。这里提前把该风险暴露在转换期：
+            // 槽的 original_name 必须能在 catalog textures 的名字集合里找到。
+            set<string> catalogNames;
+            if (cJSON_IsObject(cat.textures))
+                for (auto* t = cat.textures->child; t; t = t->next) {
+                    auto nm = get(t, "name");
+                    if (cJSON_IsString(nm)) catalogNames.insert(nm->valuestring);
+                }
             cJSON* jslots = jarr();
             for (auto& kv : slotOf) {
                 cJSON* s = obj(nullptr);
@@ -1176,6 +1185,11 @@ static int convertEff(const string& dir, const string& catDir, const string& out
                 jadd(cands, c);
                 cJSON_AddItemToObject(s, "candidates", cands);
                 jadd(jslots, s);
+                auto* t = cJSON_GetArrayItem(jtextures, kv.second);
+                const string orig = t ? jstr(t, "original_name") : string();
+                if (!catalogNames.empty() && !catalogNames.count(orig))
+                    cerr << "texture slot warning: 槽 " << kv.first << " 的 original_name \"" << orig
+                         << "\" 不在 catalog textures 里，运行时可能报 Texture name pin missing\n";
             }
             cJSON_AddItemToObject(mroot, "texture_slots", jslots);
             jadd(caps, jstrv("texture-slots"));
