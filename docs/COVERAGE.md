@@ -16,7 +16,7 @@
 | EFMI | 旧布局缺尾部顶点属性 | ✅（显式 `--compat-layout`） | 仅当 source stride **小于** target 时尾部零填充；不删除/不重排；source > target 仍明确拒绝 |
 | EFMI | 旧全局骨骼 → 目标局部骨骼 | ✅（`--skeleton` TOS 表） | `avtos` 输出 global_id→bone_name；converter 按 bone name 查目标组件 `bone_names`；dapan TOS 324 根，64/64 catalog bones 命中 |
 | EFMI | stride12 本地骨，源骨骼数 ≤ 目标组件骨骼数 | ✅（`--compat-bones` 直映） | 显式直映 source 0..N-1 → target 0..N-1；旧 Zhuang 从 3 提到 8 meshes，`be-bem validate` OK；属于兼容映射，需人工复核动画 |
-| EFMI | 选项/热键/多外观 | 🟡 | 已检测 `KeySwap`/`KeyToggle` 并打印组/选项（样本 SI V1.0：5 组）；BEM 1.1 option_groups 尚未映射，转换仍是固定单外观 |
+| EFMI | 选项/热键/多外观 | ✅ | 检测 `KeySwap`/`KeyToggle`；有选项时**默认自动**输出 BEM 1.1 `option_groups` + `component_rules`（样本 SI V1.0：5 组/15 规则）；`--no-options` 显式压回固定单外观 1.0 |
 | EFMI | 新贴图段名 `Resource_Texture_<hash>` + `TextureOverride_Texture_<hash>` | ✅ | 旧 `TextureNNN` 与新 hash 命名都支持（样本 SI V1.0：贴图 0→31） |
 | EFF | Format 3（`EFF_AUTHOR_FILE3` v3, kind=1） | ✅ | Replace/Part/Mesh/Material/Texture |
 | EFF | `handling=replace/keep/skip/hide` | ✅ | hide → BEM `operation: hide`，skip/keep → `keep` |

@@ -35,7 +35,8 @@ using namespace std;
 static bool g_textureFingerprint = false;
 static bool g_autoEntries = false; // --auto-entries：布局-only catalog 的唯一指纹锚定
 static string g_optionReport;      // --option-report <file>：EFMI 选项/组件条件导出
-static bool g_emitOptions = false; // --emit-options：输出 BEM 1.1 option_groups
+static bool g_emitOptions = false; // --emit-options：强制/显式输出 BEM 1.1（有 option_groups 时默认自动开启）
+static bool g_noOptions = false;   // --no-options：即使源包有 KeySwap/KeyToggle，也压成固定单外观 1.0
 static bool g_textureCompress = false; // --texture-compress：RGBA32 -> BC1/BC3
 // 显式开启的旧布局兼容：源 VB 缺少目标尾部顶点属性时补零，而不是直接拒绝。
 // 只允许 source stride < target stride；不做删除/重排，避免静默猜布局。
@@ -1760,8 +1761,8 @@ static map<string, vector<EfmiDrawCond>> parseEfmiDrawConditions(const Ini& ini)
     return out;
 }
 
-// EFMI option surfaces (KeySwap/KeyToggle) are detected but not yet mapped to
-// BEM 1.1 option_groups. Report them instead of silently collapsing to one state.
+// EFMI option surfaces (KeySwap/KeyToggle) -> BEM 1.1 option_groups。
+// 检测到多外观时默认输出 1.1；--no-options 可显式压成固定单外观 1.0。
 static vector<pair<string, vector<int>>> detectEfmiOptions(const Ini& ini) {
     vector<pair<string, vector<int>>> groups;
     for (auto& s : ini.order) {
@@ -2278,7 +2279,8 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
         }
         cJSON_AddItemToObject(japp, "components", jac); jadd(japps, japp);
 
-        bool emit11 = g_emitOptions && !optionGroups.empty();
+        // 有真实多外观时才升 1.1；默认自动，--no-options 显式回退 1.0。
+        bool emit11 = !g_noOptions && (!optionGroups.empty() || g_emitOptions);
         if (emit11) {
             // 1.1 的 attributes 必须与三条流 stride 严格吻合；catalog 缺 attributes 时
             // 无法合成合法声明，宁可不发 1.1，也不写出会被 validator 拒绝的包。
@@ -3023,6 +3025,7 @@ int main(int argc, char** argv) {
             else if (a == "--auto-entries") g_autoEntries = true;
             else if (a == "--option-report" && i + 1 < argc) g_optionReport = argv[++i];
             else if (a == "--emit-options") g_emitOptions = true;
+            else if (a == "--no-options") g_noOptions = true;
             else if (a == "--compat-layout") g_compatLayout = true;
             else if (a == "--compat-bones") g_compatBones = true;
             else if (a == "--skeleton" && i + 1 < argc) skeletonPath = argv[++i];

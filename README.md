@@ -40,8 +40,11 @@ make            # -> build/c4ben
 ./build/c4ben convert <mod> --catalog <catalog> --character chr_XXXX --auto-entries --out <输出.bem>
 # 导出 EFMI 选项组与「变体 → 组件」绘制条件（BEM 1.1 option_groups 的前置数据）
 ./build/c4ben convert <mod> --catalog <catalog> --option-report options.json --out <输出.bem>
-# 直接输出 BEM 1.1（option_groups + component_rules，保留 KeySwap 多外观）
+# EFMI 有 KeySwap/KeyToggle 时默认自动输出 BEM 1.1（option_groups + component_rules）
+./build/c4ben convert <mod> --catalog <catalog> --out <输出.bem>
+# 强制 1.1（或显式指定）；--no-options 则压回固定单外观 1.0
 ./build/c4ben convert <mod> --catalog <catalog> --emit-options --out <输出.bem>
+./build/c4ben convert <mod> --catalog <catalog> --no-options --out <输出.bem>
 # opt-in：RGBA32/BC2 压缩成 BC1/BC3（默认仍 RGBA32）
 ./build/c4ben convert <mod> --catalog <catalog> --texture-compress --out <输出.bem>
 ```
