@@ -9,7 +9,11 @@ TMP=${TMP:-$ROOT/.work/bc-integration}
 rm -rf "$TMP"; mkdir -p "$TMP"
 "$C4" fixture "$TMP/mod" --catalog "$CAT" --character chr_0036_jsspsi >"$TMP/fixture.log" 2>&1
 "$C4" convert "$TMP/mod" --catalog "$CAT" --texture-compress --out "$TMP/out.bem" >"$TMP/convert.log" 2>&1
-grep -q 'texture compress: BC' "$TMP/convert.log" || { echo "FAIL: no texture compress line"; exit 1; }
-[ -x "$BEM" ] && "$BEM" validate "$TMP/out.bem" >/dev/null 2>&1 || { echo "FAIL: validate"; exit 1; }
+grep -qE 'texture compress: BC|texture-compress skipped' "$TMP/convert.log" || { echo "FAIL: no texture-compress decision line"; exit 1; }
+if [ -x "$BEM" ]; then
+  "$BEM" validate "$TMP/out.bem" >/dev/null 2>&1 || { echo "FAIL: validate"; exit 1; }
+else
+  echo "SKIP validate: native be-bem not found"
+fi
 grep 'texture compress' "$TMP/convert.log" | head -3
 echo "PASS bc-integration"

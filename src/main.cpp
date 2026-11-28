@@ -212,8 +212,27 @@ static Dds readDds(const string& path) {
 
 // --texture-compress：把 BEM fmt4 (RGBA32) 编码成 BC1/BC3。可选、默认关闭；
 // 不改变 DDS 原生 BC1/3/4/5/7 直通路径。arm64 纯标量实现。
-static void applyTextureCompression(Dds& d) {
+static bool normalLikeName(const string& name) {
+    string s = lower(name);
+    if (s.find("normal") != string::npos || s.find("_nm") != string::npos) return true;
+    if (s.find("_n.") != string::npos || s.find("_n_") != string::npos) return true;
+    if (s.find("_n-") != string::npos) return true;
+    if (s.size() >= 2 && s.compare(s.size() - 2, 2, "_n") == 0) return true;
+    return false;
+}
+
+static void applyTextureCompression(Dds& d, const string& hint) {
     if (!g_textureCompress || d.fmt != 4 || d.data.empty()) return;
+    // 第一版只压 mip0：DDS 多 mip 链若只压一部分会让 payload 长度不匹配。
+    if (d.mips > 1) {
+        cerr << "texture-compress skipped (mips=" << d.mips << "): " << hint << "\n";
+        return;
+    }
+    // BC1 对法线双通道精度损失太大；第一版宁可不压，等 BC5 编码器。
+    if (normalLikeName(hint)) {
+        cerr << "texture-compress skipped (normal-like; needs BC5): " << hint << "\n";
+        return;
+    }
     bool hasAlpha = false;
     for (size_t i = 3; i < d.data.size(); i += 4)
         if (d.data[i] != 255) { hasAlpha = true; break; }
@@ -246,7 +265,7 @@ static Dds readTexture(const string& path, const string& hint) {
         Dds d = readDds(path);
         // legacy DDS 头不带色彩空间；沿用与 PNG/TGA 相同的历史启发式补齐。
         if (!d.srgbKnown) d.srgb = !linearTextureName(hint.empty() ? path : hint);
-        applyTextureCompression(d);
+        applyTextureCompression(d, hint.empty() ? path : hint);
         return d;
     }
     int w = 0, h = 0, n = 0;
@@ -256,7 +275,7 @@ static Dds readTexture(const string& path, const string& hint) {
     d.srgb = !linearTextureName(hint.empty() ? path : hint);
     d.data.assign(pixels, pixels + (size_t)w * h * 4);
     stbi_image_free(pixels);
-    applyTextureCompression(d);
+    applyTextureCompression(d, hint.empty() ? path : hint);
     return d;
 }
 
