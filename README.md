@@ -36,6 +36,8 @@ make            # -> build/c4ben
 ./build/c4ben convert <mod> --catalog <catalog> --texture-fingerprint --out <输出.bem>
 # 外部提取器（ForTMR 等）给出的 hash→component/texture 身份映射
 ./build/c4ben convert <mod> --catalog <catalog> --identities identities.json --out <输出.bem>
+# catalog 只有布局、entries 为空时（新版 VFS 回填），按唯一布局指纹自动锚定组件
+./build/c4ben convert <mod> --catalog <catalog> --character chr_XXXX --auto-entries --out <输出.bem>
 ```
 
 - `<mod目录>` 需要有 `mod.ini`；也可直接传 `.zip` / `.rar` / `.7z`，包内允许带一层目录，多处 `mod.ini` 会报歧义。
@@ -84,11 +86,12 @@ make            # -> build/c4ben
 
 - 贴图：DDS BC1/3/4/5/7 原生直通；BC2/DXT3 解码为 RGBA32；TGA/PNG/JPG 解码为 RGBA32；BC6H（HDR）、cubemap、volume、texture array 明确拒绝（BEM 2D 无法表达）。
 - EFF 的材质/贴图只在 catalog 里能找到同名 `source.asset` 时绑定；自定义 Liino 贴图会跳过并报告。
-- EFF `.effres` kind=2 已解析 float/color/keyword 并输出 BEM 1.5 `material_overrides`；`render_queue`/渲染状态暂未写入。
+- EFF `.effres` kind=2 已解析 float/color/keyword 并输出 BEM 1.5 `material_overrides`；`render_queue` 与 `shader_passes` 已写入该段。
 - EFF 辅助骨骼用祖先替代，会损失飘带/裙摆的二级摆动。
 - EFF 的 blendshape、物理、特效、LOD 不转；EFF 网格的 UV0–UV7 并集与 color 会保留。
 - EFMI 支持标准 ComponentN 的 skin stride 4/8/12/16/24（8/4/24 为 L3 推断，见 docs/COVERAGE.md）；EFMI 选项/热键/多外观会检测并打印（KeySwap/KeyToggle），但还没有映射到 BEM option_groups。
 - 合并不住的组件会 `keep`，不猜；catalog 缺 hash 的包不输出，或走 `inspect-legacy` 兼容层。
+- 新版 VFS 回填的 catalog 只有 `components` 布局、`entries`/`textures` 为空。用 `--auto-entries` 可按「draw 索引数精确相等 + 顶点数不超过目标 + stride 一致」的唯一布局指纹自动补条目；多个候选时报 ambiguous 并跳过，不猜。目标是新角色包不必手工写 mapping。
 - 旧版 catalog/资源缺失时无法自动完成身份锚定（样本：庄方宜旧包）；EFMI ALPHA-5 包可用 `--legacy-auto --texture-fingerprint` 恢复几何+贴图。
 - 非模型包（GUI/HUD/POI）与动态 `Pool_MergedSkeleton` EFMI 变体会明确报错，不再误报 catalog 不匹配。
 - 二进制 payload 未压缩；大包会到几十 MB。

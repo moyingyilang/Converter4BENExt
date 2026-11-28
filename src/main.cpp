@@ -32,6 +32,7 @@
 
 using namespace std;
 static bool g_textureFingerprint = false;
+static bool g_autoEntries = false; // --auto-entries：布局-only catalog 的唯一指纹锚定
 // 显式开启的旧布局兼容：源 VB 缺少目标尾部顶点属性时补零，而不是直接拒绝。
 // 只允许 source stride < target stride；不做删除/重排，避免静默猜布局。
 static bool g_compatLayout = false;
@@ -1617,8 +1618,74 @@ static vector<pair<string, vector<int>>> detectEfmiOptions(const Ini& ini) {
     return groups;
 }
 
-static int convertEfmi(const string& dir, const string& catDir, const string& out) {
-        auto ini = Ini::parse(dir + "/mod.ini");
+// 布局-only catalog（新版 VFS 回填只给 components，entries 为空）的自动锚定。
+// 只有“指纹唯一命中”时才写 entries，多个候选一律不猜，符合项目“不猜”的约定。
+// 指纹 = 顶点数 + 索引数 + 三条流的 stride。
+static int inferEntriesByLayout(Cat& cat, const string& dir, Ini& ini) {
+    if (!cJSON_IsObject(cat.entries) || !cJSON_IsObject(cat.comps)) return 0;
+    int added = 0;
+    for (auto& s : ini.order) {
+        int mid = effiComponentMid(s);
+        if (mid < 0) continue;
+        auto hit = ini.sec[s].find("hash");
+        if (hit == ini.sec[s].end()) continue;
+        const string hash = lower(hit->second);
+        if (cJSON_GetObjectItemCaseSensitive(cat.entries, hash.c_str())) continue;
+
+        int vcount = 0, s0 = 0, s1 = 0, s2 = 0, maxBone = -1, usedBone = 0;
+        int icount = legacyIndexCount(dir, ini, mid, vcount, s0, s1, s2, maxBone, usedBone);
+        if (icount < 0 || vcount <= 0) continue;
+
+        vector<int> matches;
+        int exactV = 0;
+        for (auto* c = cat.comps->child; c; c = c->next) {
+            auto* comp = c;
+            auto* subs = get(comp, "submeshes");
+            int ci = (cJSON_IsArray(subs) && cJSON_GetArraySize(subs) > 0) ? jint(cJSON_GetArrayItem(subs, 0), "index_count") : 0;
+            // EFMI 替换网格的 draw 索引数必须与目标完全一致；顶点数允许比目标多
+            // （作者常在 UV 缝处拆分顶点），所以按 index_count 精确 + vertex_count 上限匹配。
+            if (ci != icount || ci == 0) continue;
+            const int cv = jint(comp, "vertex_count");
+            if (cv > vcount) continue;
+            // 有 source_streams 的组件再校验一遍 stride（有则更可信）
+            auto* streams = get(comp, "source_streams");
+            if (cJSON_IsArray(streams) && cJSON_GetArraySize(streams) >= 3) {
+                int cs[3] = {0, 0, 0};
+                bool okStreams = true;
+                for (int i = 0; i < 3; i++) {
+                    auto* sem = get(cJSON_GetArrayItem(streams, i), "semantics");
+                    if (!cJSON_IsArray(sem)) { okStreams = false; break; }
+                    for (auto* q = sem->child; q; q = q->next) cs[i] += jint(q, "stride");
+                }
+                if (okStreams && (cs[0] != s0 || cs[1] != s1 || cs[2] != s2)) continue;
+            }
+            matches.push_back(stoi(string(c->string)));
+            if (cv == vcount) exactV++;
+        }
+        if (matches.size() > 1 && exactV == 1) {
+            // 顶点数完全相等的那个更可信
+            int keep = -1;
+            for (auto* c = cat.comps->child; c; c = c->next) {
+                auto* subs = get(c, "submeshes");
+                int ci = (cJSON_IsArray(subs) && cJSON_GetArraySize(subs) > 0) ? jint(cJSON_GetArrayItem(subs, 0), "index_count") : 0;
+                if (ci == icount && jint(c, "vertex_count") == vcount) { keep = stoi(string(c->string)); break; }
+            }
+            matches.clear();
+            if (keep >= 0) matches.push_back(keep);
+        }
+        if (matches.size() == 1) {
+            cJSON_AddItemToObject(cat.entries, hash.c_str(), cJSON_CreateNumber(matches[0]));
+            cout << "auto-entry: " << hash << " -> component " << matches[0]
+                 << " (v=" << vcount << " idx=" << icount << " strides=" << s0 << "/" << s1 << "/" << s2 << ")\n";
+            added++;
+        } else if (matches.size() > 1) {
+            cout << "auto-entry: " << hash << " ambiguous (" << matches.size() << " candidates), skipped\n";
+        }
+    }
+    return added;
+}
+
+static int convertEfmi(const string& dir, const string& catDir, const string& out) {        auto ini = Ini::parse(dir + "/mod.ini");
         if (effKey(ini, "Mod", "format") == "3") return convertEff(dir, catDir, out);
         int componentEntries = 0;
         for (auto& section : ini.order) if (effiComponentMid(section) >= 0) ++componentEntries;
@@ -1648,6 +1715,10 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
         Cat cat = g_forceCharacter.empty() ? loadCatalog(catDir, hashes)
                                            : loadCatalogByCharacter(catDir, g_forceCharacter);
         applyIdentities(cat);
+        if (g_autoEntries) {
+            const int added = inferEntriesByLayout(cat, dir, ini);
+            if (added > 0) cout << "auto-entries: " << added << " component(s) anchored by layout fingerprint\n";
+        }
         cout << "target: " << cat.character << " (" << jstr(cat.root, "name") << "), matched " << hashes.size() << " entries\n";
 
         // map mod component -> catalog component id
@@ -2388,6 +2459,7 @@ int main(int argc, char** argv) {
             else if (a == "--allow-review") allowReview = true;
             else if (a == "--legacy-auto") legacyAuto = true;
             else if (a == "--texture-fingerprint") g_textureFingerprint = true;
+            else if (a == "--auto-entries") g_autoEntries = true;
             else if (a == "--compat-layout") g_compatLayout = true;
             else if (a == "--compat-bones") g_compatBones = true;
             else if (a == "--skeleton" && i + 1 < argc) skeletonPath = argv[++i];
