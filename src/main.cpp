@@ -2295,7 +2295,11 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
                     cJSON_AddItemToObject(d0, "indices", cJSON_Duplicate(idx, 1));
                     cJSON_AddItemToObject(d0, "count", cJSON_Duplicate(cnt, 1));
                     cJSON_DeleteItemFromObject(mesh, "indices");
-                    cJSON_DeleteItemFromObject(mesh, "index_count");
+                    // 注意：mesh 级 index_count 必须保留。
+                    // BEN 的 Rust 校验器（native/bem/src/lib.rs:346）无条件要求它；
+                    // 而 BEM 1.1 规范说「不再用网格级 indices 和固定 index_count」。
+                    // 实测两份校验器不一致，保留 index_count 可同时满足两边：
+                    // Rust 只校验 indices 存在时的长度，draw 级 indices/count 照常。
                 }
             }
 
