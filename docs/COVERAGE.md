@@ -22,6 +22,7 @@
 | EFF | `handling=replace/keep/skip/hide` | ✅ | hide → BEM `operation: hide`，skip/keep → `keep` |
 | EFF | `.effres` kind=2 材质参数/颜色/关键字 | ✅ | 解析 `float.*` / `value4.*` / `keyword.*` / `render_queue`，输出 BEM 1.5 `draws[].material_overrides` |
 | EFF | `render_queue` / 渲染状态 | ✅ | 输出 `material_overrides.render_queue` + `shader_passes`（来自材质 JSON 的 `disabledShaderPasses`），声明 `material-render-state-v1` |
+| EFF/EFMI | `texture.<prop>` → 目标纹理槽语义 | ⚠️ 已知限制 | 当前 `draw.textures` 是 anonymous 索引；BEM 的 slot 语义需要 `texture_slots[].id`（运行时 `material.get_texture_property_ids` 的 int32 ID），catalog 目前只有 property 名、没有 ID，故暂不生成 slot 引用，避免编造 ID |
 | EFF | 物理/特效/blendshape/LOD | ❌ | 不是 BEM 1.0 可表达范围，需明确声明不支持 |
 | EFF | 运行期骨骼重定向 Compute Shader | ❌ | 跨 IB 绘制依赖它；删掉会错绑 |
 | EFF/EFMI | 非 catalog 的自定义贴图/材质 | ❌ | 需要 donor 或 catalog 材质表；当前跳过并报错 |
