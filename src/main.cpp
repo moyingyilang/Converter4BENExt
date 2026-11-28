@@ -2295,7 +2295,8 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
                     cJSON_AddItemToObject(d0, "indices", cJSON_Duplicate(idx, 1));
                     cJSON_AddItemToObject(d0, "count", cJSON_Duplicate(cnt, 1));
                     cJSON_DeleteItemFromObject(mesh, "indices");
-                    cJSON_DeleteItemFromObject(mesh, "index_count");
+                    // 保留 mesh.index_count：BEN native validator 在 1.1 仍要求该字段用于
+                    // 校验 indices payload 的长度；draw 级 count 是额外索引，不冲突。
                 }
             }
 
