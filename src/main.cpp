@@ -1731,22 +1731,30 @@ static map<string, vector<EfmiDrawCond>> parseEfmiDrawConditions(const Ini& ini)
         auto it = ini.sec.find(s);
         if (it == ini.sec.end()) continue;
         for (auto& kv : it->second) {
-            if (kv.first.rfind("$draw_", 0) != 0) continue;
+            // 键名可能带 `global ` 之类的前缀（[Constants] 里写作
+            //   global $draw_component_2_56510c18 = 1），
+            // 所以从第一个 '$' 开始取，而不是要求键本身以 $draw_ 开头。
+            const size_t dollar = kv.first.find('$');
+            if (dollar == string::npos) continue;
+            const string key = kv.first.substr(dollar);
+            if (key.rfind("$draw_", 0) != 0) continue;
             // 变量名里带 8 位组件 hash：$draw_component_<n>_<hash>...
             string hash;
             size_t pos = 0;
-            while ((pos = kv.first.find('_', pos)) != string::npos) {
-                const string cand = kv.first.substr(pos + 1, 8);
+            while ((pos = key.find('_', pos)) != string::npos) {
+                const string cand = key.substr(pos + 1, 8);
                 if (cand.size() == 8 && cand.find_first_not_of("0123456789abcdefABCDEF") == string::npos) { hash = lower(cand); break; }
                 pos++;
             }
             if (hash.empty()) continue;
-            // 条件形如 ($swapvar_x == 0)
+            // 条件形如 ($swapkey3 == 0) / ($swapvar_toggle_0 == 0)
             const string& v = kv.second;
             const size_t eq = v.find("==");
             if (eq == string::npos) continue;
             string group = v.substr(0, eq);
-            const size_t gs = group.find("$swapvar");
+            // EFMI 的组变量前缀不统一：swapvar_*（老写法）、swapkey*（KeySwap 段）、
+            // swap*（其它变体）。只认 $swapvar 会把 SI 这类包的门控全部丢掉。
+            const size_t gs = group.find("$swap");
             if (gs == string::npos) continue;
             group = group.substr(gs);
             while (!group.empty() && !isalnum((unsigned char)group[0]) && group[0] != '$') group.erase(group.begin());
@@ -1925,7 +1933,11 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             if (it == ini.sec[s].end()) continue;
             const string h = lower(it->second);
             hashes.push_back(h);
-            midHash[mid0] = h;
+            // midName 只用于选项条件关联：LOD 变体段（..._Component9_LOD1）经
+            // atoi 后与基础段同号，会覆盖基础段的 hash，导致按 hash 反查条件失败。
+            // 条件只描述基础组件，所以这里保留首个（非 LOD）段的 hash。
+            const bool isLod = s.find("_LOD") != string::npos;
+            if (!isLod || !midHash.count(mid0)) midHash[mid0] = h;
         }
         Cat cat = g_forceCharacter.empty() ? loadCatalog(catDir, hashes)
                                            : loadCatalogByCharacter(catDir, g_forceCharacter);
