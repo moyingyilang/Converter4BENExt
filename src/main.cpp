@@ -39,6 +39,7 @@ static bool g_emitOptions = false; // --emit-options：强制/显式输出 BEM 1
 static bool g_noOptions = false;   // --no-options：即使源包有 KeySwap/KeyToggle，也压成固定单外观 1.0
 static bool g_textureCompress = false; // --texture-compress：RGBA32 -> BC1/BC3
 static bool g_fixtureRabbitFx = false; // fixture --rabbitfx：生成 RabbitFX 风格贴图绑定
+static bool g_fixtureMaskTexture = false; // fixture --mask-texture：加一张 mask 类贴图，覆盖 BC4 路径
 // 显式开启的旧布局兼容：源 VB 缺少目标尾部顶点属性时补零，而不是直接拒绝。
 // 只允许 source stride < target stride；不做删除/重排，避免静默猜布局。
 static bool g_compatLayout = false;
@@ -2897,6 +2898,29 @@ static int genFixture(const string& outDir, const string& catDir, const string& 
         ini += "[ResourceTexture0]\nfilename = " + fn + "\n\n";
         cout << "  rabbitfx: " << fxName << " hash=" << fxHash << "\n";
     }
+    // --mask-texture：把 catalog 里真实存在的 mask 类贴图作为独立纹理段写进去。
+    // BC2 在读取时会被解码成 RGBA32（fmt 4），正好是 --texture-compress 的处理对象，
+    // 从而让 maskLikeName -> BC4 这条分支被真正执行到（否则没有任何样本能触发它）。
+    if (g_fixtureMaskTexture && cJSON_IsObject(cat.textures)) {
+        string mHash, mName;
+        for (auto* t = cat.textures->child; t && mHash.empty(); t = t->next) {
+            auto nm = get(t, "name");
+            if (!cJSON_IsString(nm)) continue;
+            const string low = lower(nm->valuestring);
+            for (const char* tok : {"_mask", "mask", "rough", "metal", "_mra", "_orm", "_ao"}) {
+                if (low.find(tok) != string::npos) { mHash = lower(string(t->string)); mName = nm->valuestring; break; }
+            }
+        }
+        if (mHash.empty()) {
+            cerr << "warning: catalog 里没有 mask 类贴图名，--mask-texture 跳过\n";
+        } else {
+            writeFile(outDir + "/Textures/" + mHash + ".dds", fxDds("BC2", 64, 64));
+            ini += "[Resource_Texture_" + mHash + "]\nfilename = Textures/" + mHash + ".dds\n\n";
+            ini += "[TextureOverride_Texture_" + mHash + "]\nhash = " + mHash +
+                   "\nps-t0 = Resource_Texture_" + mHash + "\n\n";
+            cout << "  mask texture: " << mName << " hash=" << mHash << "\n";
+        }
+    }
     writeFile(outDir + "/mod.ini", vector<uint8_t>(ini.begin(), ini.end()));
 
     cout << "fixture written to " << outDir << ": component=" << cid << " hash=" << compHash
@@ -3056,6 +3080,7 @@ int main(int argc, char** argv) {
                 if (a == "--catalog" && i + 1 < argc) catDir = argv[++i];
                 else if (a == "--character" && i + 1 < argc) character = argv[++i];
                 else if (a == "--rabbitfx") g_fixtureRabbitFx = true;
+                else if (a == "--mask-texture") g_fixtureMaskTexture = true;
                 else outDir = a;
             }
             if (outDir.empty() || catDir.empty() || character.empty()) {
