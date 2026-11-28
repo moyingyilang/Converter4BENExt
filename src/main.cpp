@@ -566,6 +566,9 @@ struct EffMatData {
     vector<string> enableKeywords, disableKeywords;
     map<string,bool> shaderPasses;
     int renderQueue = -1;
+    // render_queue 只有源里显式写了才算 override；默认 -1 只是「未设置」的哨兵，
+    // 不能当成数据写进 manifest（否则等于凭空声明一个渲染队列）。
+    bool hasRenderQueue = false;
 };
 
 static bool validMatProp(const string& name) {
@@ -603,7 +606,7 @@ static EffMatData parseEffMaterial(const string& path) {
         if (line.empty()) continue;
         if (line[0] == ';') break;
         if (line.rfind("overrides=", 0) == 0) { d.overrides = line.find("true") != string::npos; continue; }
-        if (line.rfind("render_queue=", 0) == 0) { d.renderQueue = atoi(line.c_str() + 13); continue; }
+        if (line.rfind("render_queue=", 0) == 0) { d.renderQueue = atoi(line.c_str() + 13); d.hasRenderQueue = true; continue; }
         if (line.rfind("float.", 0) == 0) {
             auto eq = line.find('='); if (eq == string::npos) continue;
             string name = line.substr(6, eq - 6);
@@ -930,7 +933,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
                     cJSON_AddItemToObject(mo, "shader_passes", sp);
                     any = true; hasRenderState = true;
                 }
-                if (md.renderQueue >= -1 && md.renderQueue <= 5000) {
+                if (md.hasRenderQueue && md.renderQueue >= 0 && md.renderQueue <= 5000) {
                     cJSON_AddNumberToObject(mo, "render_queue", md.renderQueue);
                     any = true;
                     hasRenderState = true;
