@@ -38,6 +38,7 @@ static string g_optionReport;      // --option-report <file>：EFMI 选项/组�
 static bool g_emitOptions = false; // --emit-options：强制/显式输出 BEM 1.1（有 option_groups 时默认自动开启）
 static bool g_noOptions = false;   // --no-options：即使源包有 KeySwap/KeyToggle，也压成固定单外观 1.0
 static bool g_textureCompress = false; // --texture-compress：RGBA32 -> BC1/BC3
+static bool g_fixtureRabbitFx = false; // fixture --rabbitfx：生成 RabbitFX 风格贴图绑定
 // 显式开启的旧布局兼容：源 VB 缺少目标尾部顶点属性时补零，而不是直接拒绝。
 // 只允许 source stride < target stride；不做删除/重排，避免静默猜布局。
 static bool g_compatLayout = false;
@@ -2780,6 +2781,23 @@ static int genFixture(const string& outDir, const string& catDir, const string& 
     if (bound.empty() && cJSON_IsObject(cat.textures))
         for (auto* t = cat.textures->child; t && bound.size() < 5; t = t->next) bound.push_back(lower(string(t->string)));
 
+    // --rabbitfx：挑一个「catalog 里有 hash 且出现在 material_texture_properties 里」的贴图，
+    // 用它生成 RabbitFX 风格资源段（[ResourceTextureN] + 文件名带 t=<8hex>），
+    // 这样绑定会走 EFMI 的 RabbitFX 解析路径 + catalog textures 的 hash 查名，
+    // 是真实数据（不是自造的），可用来验证 slot→catalog 贴图名的绑定是否成立。
+    string fxHash, fxName;
+    if (g_fixtureRabbitFx && cJSON_IsArray(mats)) {
+        for (auto* grp = mats->child; grp && fxHash.empty(); grp = grp->next) {
+            if (!cJSON_IsArray(grp)) continue;
+            for (auto* nm = grp->child; nm && fxHash.empty(); nm = nm->next) {
+                if (!cJSON_IsString(nm)) continue;
+                auto it = nameToHash.find(nm->valuestring);
+                if (it != nameToHash.end()) { fxName = nm->valuestring; fxHash = it->second; }
+            }
+        }
+        if (fxHash.empty()) cerr << "warning: --rabbitfx 找不到可用贴图（catalog textures 为空？），回落到普通贴图段\n";
+    }
+
     vector<uint8_t> vb0, vb1, vb2, ib;
     for (int i = 0; i < vcount; i++) {
         const float x = (float)(i % 64) * 0.1f, y = (float)((i / 64) % 64) * 0.1f;
@@ -2820,6 +2838,11 @@ static int genFixture(const string& outDir, const string& catDir, const string& 
     ini += "match_first_index = 0\n";
     ini += "match_index_count = " + to_string(icount) + "\n";
     ini += "drawindexed = " + to_string(icount) + ", 0, 0\n\n";
+    if (!fxHash.empty()) {
+        // RabbitFX 绑定写法：组件里 ref 资源段，而不是 ps-t0
+        ini += "Resource\\RabbitFX\\Diffuse = ref ResourceTexture0\n";
+        ini += "run = CommandList\\RabbitFX\\SetTextures\n\n";
+    }
     const char* names[3] = {"VB0", "VB1", "VB2"};
     for (int i = 0; i < 3; i++) {
         ini += string("[Resource_Component") + to_string(cid) + "_" + names[i] + "]\n";
@@ -2828,9 +2851,16 @@ static int genFixture(const string& outDir, const string& catDir, const string& 
     }
     ini += "[Resource_Component" + to_string(cid) + "_IB]\nstride = 2\nfilename = Meshes/ib.buf\n\n";
     for (size_t i = 0; i < texOut.size(); i++) {
+        if (!fxHash.empty()) break;   // rabbitfx 模式只写一个资源段
         ini += "[Resource_Texture_" + texOut[i].first + "]\nfilename = Textures/" + texOut[i].first + ".dds\n\n";
         ini += "[TextureOverride_Texture_" + texOut[i].first + "]\nhash = " + texOut[i].first +
                "\nps-t0 = Resource_Texture_" + texOut[i].first + "\n\n";
+    }
+    if (!fxHash.empty()) {
+        const string fn = "Textures/c=0-1 f=BC7_UNORM t=" + fxHash + " d=0011223344556677.dds";
+        writeFile(outDir + "/" + fn, fxDds("BC7", 64, 64));
+        ini += "[ResourceTexture0]\nfilename = " + fn + "\n\n";
+        cout << "  rabbitfx: " << fxName << " hash=" << fxHash << "\n";
     }
     writeFile(outDir + "/mod.ini", vector<uint8_t>(ini.begin(), ini.end()));
 
@@ -2990,6 +3020,7 @@ int main(int argc, char** argv) {
                 string a = argv[i];
                 if (a == "--catalog" && i + 1 < argc) catDir = argv[++i];
                 else if (a == "--character" && i + 1 < argc) character = argv[++i];
+                else if (a == "--rabbitfx") g_fixtureRabbitFx = true;
                 else outDir = a;
             }
             if (outDir.empty() || catDir.empty() || character.empty()) {
