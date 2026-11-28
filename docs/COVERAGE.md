@@ -22,7 +22,9 @@
 | EFF | `handling=replace/keep/skip/hide` | ✅ | hide → BEM `operation: hide`，skip/keep → `keep` |
 | EFF | `.effres` kind=2 材质参数/颜色/关键字 | ✅ | 解析 `float.*` / `value4.*` / `keyword.*` / `render_queue`，输出 BEM 1.5 `draws[].material_overrides` |
 | EFF | `render_queue` / 渲染状态 | ✅ | 输出 `material_overrides.render_queue` + `shader_passes`（来自材质 JSON 的 `disabledShaderPasses`），声明 `material-render-state-v1` |
-| EFF/EFMI | `texture.<prop>` → 目标纹理槽语义 | ⚠️ 已知限制 | 当前 `draw.textures` 是 anonymous 索引；BEM 的 slot 语义需要 `texture_slots[].id`（运行时 `material.get_texture_property_ids` 的 int32 ID），catalog 目前只有 property 名、没有 ID，故暂不生成 slot 引用，避免编造 ID |
+| EFF | `.effres` 的 `texture.<prop>` 槽位语义 | 🟡 | **只解析、不落到 manifest**：目前贴图进 `draw.textures`（匿名整数引用），未生成 `texture_slots`；缺 `property_id`，见 §6 |
+| EFF | 材质名不在 catalog `materials` 里 | ✅ | 打印 `material skip: <asset> not in catalog materials of component <cid> (material_overrides dropped)`，丢弃覆盖而不是回落到 slot 0 |
+| EFF | `.effres` 未声明 `render_queue` | ✅ | 不写该字段（`-1` 只是「未设置」哨兵，不当数据发射；见 §6） |
 | EFF | 物理/特效/blendshape/LOD | ❌ | 不是 BEM 1.0 可表达范围，需明确声明不支持 |
 | EFF | 运行期骨骼重定向 Compute Shader | ❌ | 跨 IB 绘制依赖它；删掉会错绑 |
 | EFF/EFMI | 非 catalog 的自定义贴图/材质 | ❌ | 需要 donor 或 catalog 材质表；当前跳过并报错 |
@@ -118,3 +120,43 @@
 make
 BEM_CLI=/path/to/be-bem tests/coverage.sh <mods-root> <BEN-catalog-dir> build/coverage.md
 ```
+
+## 6. 已知限制（语义未闭环，不是 bug）
+
+### 6.1 `texture.<prop>` 槽位未映射到 `texture_slots`
+
+EFF 材质 `.effres` 里有 `texture._BaseMap=<Texture 段名>` 这类行，转换器目前**只解析**，贴图统一进 `draw.textures`（裸整数 = anonymous 引用），不生成 BEM 1.2+ 的 `texture_slots`。
+
+原因（依据 BEN 侧文档与源码）：
+
+- `texture_slots[].id` 必须是运行时 `material.get_texture_property_ids` 返回的 **int32 属性 ID**；
+- catalog 的 `material_texture_properties` 只有 `property`（`_BaseMap` 等）与 `name`，**没有数值 ID**；
+- `docs/custom_model/research/1.5.3/runtime-probes/CUSTOM_MODEL_RUNTIME_PROBE_ZHUANGFANGYI.md:53` 明确要求「保留实际 `property_id`；……不能猜测 ID→名称映射」。
+
+**强行生成只能编造 ID，运行时匹配不上，比不写更糟。** 因此当前选择保持匿名整数引用（结构合法、校验通过），语义留白。
+
+解除条件（任一）：
+
+1. 从 BEN 运行时 / VFS 导出 `material.get_texture_property_ids`（属性名 → int32），catalog 扩展为
+   `material_texture_properties: [{property, name, property_id}]`；
+2. 或 BEN 侧提供属性 ID 的静态表。
+
+具备数据后再生成 `texture_slots` + `draw.textures` 的 `{slot: <id>}` 命名引用（需要 minor≥2 并声明 `texture-slots`）。
+
+`fixture-eff-overrides` 注入里的 `texture._BaseMap` 只用于验证**解析路径**，不承诺 manifest 语义。
+
+### 6.2 `render_queue` 的 `-1` 不当数据发射
+
+`-1` 是「未设置」哨兵而非有效渲染队列。早期实现因为发射条件写成 `>= -1`，会给任何未声明 `render_queue` 的材质凭空写一条 `render_queue: -1`——结构合法但语义是假的。现在只在源里**显式声明**且取值 `0..5000` 时才写出。
+
+连带影响：`745092_yif.zip` 原本唯一的 override 就是这条伪造值，修复后它正确回落为 BEM 1.0（payloads 32 → 23）。
+
+### 6.3 材质覆盖缺真实样本时的回归手段
+
+真实 mod 里带完整 `float`/`value4`/`keyword`/`render_queue` 的 EFF 材质很少，1.5 路径容易失去回归锚点。用 `fixture-eff-overrides` 给任意 EFF mod 注入两组材质（一组命中 catalog、一组故意不命中）来覆盖：
+
+```bash
+c4ben fixture-eff-overrides <eff-mod-dir> --catalog <dir>
+ROOT=... C4=C4 CAT=CAT BEM=BEM SAMPLE=... bash tests/eff_overrides_test.sh
+```
+
