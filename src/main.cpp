@@ -300,8 +300,15 @@ static void writeZip(const string& path, vector<Entry>& es) {
     u32(0x06054b50); u16(0); u16(0); u16(es.size()); u16(es.size()); u32(cdSize); u32(cdStart); u16(0);
 }
 
-static void writeBem(const string& path, const vector<uint8_t>& manifest, const vector<vector<uint8_t>>& payloads, int minor = 0) {
-    // BEM 二进制容器：40B header + manifest + 32B * N entries + payload blocks
+// 失败不交付：没有任何 mesh / texture 时不写空包（历史行为：legacy-auto 全组件被拒时
+// 仍会写出一个 0 内容的 BEM 并返回成功）。
+static void requireNonEmptyOutput(cJSON* jmeshes, cJSON* jtextures, const string& out) {
+    const int nm = cJSON_GetArraySize(jmeshes), nt = cJSON_GetArraySize(jtextures);
+    if (nm == 0 && nt == 0)
+        throw runtime_error("no meshes or textures converted; refusing to write an empty package: " + out);
+}
+
+static void writeBem(const string& path, const vector<uint8_t>& manifest, const vector<vector<uint8_t>>& payloads, int minor = 0) {    // BEM 二进制容器：40B header + manifest + 32B * N entries + payload blocks
     uint64_t fileSize = 40 + manifest.size() + 32ull * payloads.size();
     for (auto& p : payloads) fileSize += p.size();
     vector<uint8_t> out; out.reserve(fileSize);
@@ -918,6 +925,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     if (hasRenderState) jadd(caps,jstrv("material-render-state-v1"));
     cJSON_AddItemToObject(mroot,"required_capabilities",caps);
     cJSON_AddItemToObject(mroot,"target",jtarget);
+    requireNonEmptyOutput(jmeshes, jtextures, out);
     cJSON_AddItemToObject(mroot,"meshes",jmeshes);
     cJSON_AddItemToObject(mroot,"textures",jtextures);
     cJSON_AddStringToObject(mroot,"default_appearance_id","default");
@@ -939,7 +947,6 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     cJSON_Delete(mroot); cJSON_Delete(cat.root);
     return 0;
 }
-
 
 static int effiComponentMid(const string& s) {
     const char* a = "TextureOverride_EntryPoint_Component";
@@ -1472,6 +1479,7 @@ static int convertLegacyProfile(const string& dir, const string& catDir, const s
     cJSON* caps = jarr(); for (auto s : {"native-materials","palette-u8","indices-u32","fixed-appearances"}) jadd(caps,jstrv(s));
     cJSON_AddItemToObject(root,"required_capabilities",caps);
     cJSON_AddItemToObject(root,"target",jtarget);
+    requireNonEmptyOutput(jmeshes, jtextures, out);
     cJSON_AddItemToObject(root,"meshes",jmeshes);
     cJSON_AddItemToObject(root,"textures",jtextures);
     cJSON_AddStringToObject(root,"default_appearance_id","default");
@@ -1892,6 +1900,7 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
         cJSON* caps = jarr(); for (auto s : {"native-materials", "palette-u8", "indices-u32", "fixed-appearances"}) jadd(caps, jstrv(s));
         cJSON_AddItemToObject(mroot, "required_capabilities", caps);
         cJSON_AddItemToObject(mroot, "target", jtarget);
+        requireNonEmptyOutput(jmeshes, jtextures, out);
         cJSON_AddItemToObject(mroot, "meshes", jmeshes);
         cJSON_AddItemToObject(mroot, "textures", jtextures);
         cJSON_AddStringToObject(mroot, "default_appearance_id", "default");
