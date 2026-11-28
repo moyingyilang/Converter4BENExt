@@ -164,3 +164,34 @@ c4ben fixture-eff-overrides <eff-mod-dir> --catalog <dir>
 ROOT=... C4=C4 CAT=CAT BEM=BEM SAMPLE=... bash tests/eff_overrides_test.sh
 ```
 
+
+## 7. 本机样本缺口扫描（2026-11-28）
+
+对当前磁盘保留的 **34 个含 `mod.ini` 的样本**（原 43 个样本中部分临时目录已清理）逐包转换并统计日志：
+
+| 结果 | 数量 |
+|---|---:|
+| 成功出包（meshes>0） | 13 |
+| `no BEN catalog character matched` | 10 |
+| `not an EFMI model package`（GUI/HUD/杂项） | 10 |
+| `dynamic EFMI merged-skeleton/pool`（明确不支持） | 1 |
+
+跳过量合计：
+
+```text
+texture skip:    104
+material skip:     9
+skip comp:        26
+```
+
+高缺口样本：
+
+| 样本 | texture skip | material skip | skip comp | 说明 |
+|---|---:|---:|---:|---|
+| `745876_kay_graffiti_girl_sfw.zip` | 40 | 1 | 0 | 当前 catalog 无 Kay 角色/贴图身份 |
+| `lvtsfw/lvt` | 25 | 5 | 0 | EFF3，物料/贴图跨角色 |
+| `745110_ardelia_sr_101.7z` | 22 | 0 | 3 | 全局骨骼/贴图身份缺口 |
+| `745092_yif.zip` | 5 | 3 | 0 | 跨角色共用贴图 + 未命中 catalog 材质 |
+| `732494_si_v10_ca9ce.7z` | 4 | 0 | 0 | 4 张无身份贴图，可用 `--identities` 补，见 `docs/IDENTITIES.md` |
+
+这些计数用于追踪缺口，不代表 BEM 结构错误；成功样本均通过 native `be-bem validate`。

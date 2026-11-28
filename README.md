@@ -7,7 +7,7 @@
 
 - 语言：C++17（无 Python、无 .NET 运行时）
 - 依赖：clang++/gcc、zlib、libarchive（`.zip` 用内置 zlib，`.rar`/`.7z` 用 libarchive）；cJSON / bcdec / stb_image 已 vendored
-- 状态：EFMI 标准 ComponentN + 合并骨架、EFF Format 3 已能出包；来源覆盖矩阵见 [`docs/COVERAGE.md`](docs/COVERAGE.md)
+- 状态：EFMI 标准 ComponentN + 合并骨架、EFF Format 3 已能出包；来源覆盖矩阵见 [`docs/COVERAGE.md`](docs/COVERAGE.md)，旧包身份补全见 [`docs/IDENTITIES.md`](docs/IDENTITIES.md)
 
 ## 为什么只做迁移
 
