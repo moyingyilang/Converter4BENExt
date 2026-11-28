@@ -34,6 +34,7 @@ using namespace std;
 static bool g_textureFingerprint = false;
 static bool g_autoEntries = false; // --auto-entries：布局-only catalog 的唯一指纹锚定
 static string g_optionReport;      // --option-report <file>：EFMI 选项/组件条件导出
+static bool g_emitOptions = false; // --emit-options：输出 BEM 1.1 option_groups
 // 显式开启的旧布局兼容：源 VB 缺少目标尾部顶点属性时补零，而不是直接拒绝。
 // 只允许 source stride < target stride；不做删除/重排，避免静默猜布局。
 static bool g_compatLayout = false;
@@ -1786,9 +1787,15 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             cout << "option report written: " << g_optionReport << "\n";
         }
         vector<string> hashes;
+        map<int, string> midHash; // 组件序号 -> EFMI hash，用于把选项条件关联回组件
         for (auto& s : ini.order) {
-            if (effiComponentMid(s) < 0) continue;
-            auto it = ini.sec[s].find("hash"); if (it != ini.sec[s].end()) hashes.push_back(lower(it->second));
+            int mid0 = effiComponentMid(s);
+            if (mid0 < 0) continue;
+            auto it = ini.sec[s].find("hash");
+            if (it == ini.sec[s].end()) continue;
+            const string h = lower(it->second);
+            hashes.push_back(h);
+            midHash[mid0] = h;
         }
         Cat cat = g_forceCharacter.empty() ? loadCatalog(catDir, hashes)
                                            : loadCatalogByCharacter(catDir, g_forceCharacter);
@@ -1916,6 +1923,39 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             if ((int)vb2.size() != nv * s2 || (int)vb1.size() != nv * s1) { cout << "skip comp " << mid << ": buffer mismatch\n"; continue; }
             int ni = (int)ib.size() / 2;
 
+            // catalog 的属性布局决定流 stride。mod 的 VB stride 与它不同时必须重排，
+            // 否则会出现「属性声明与流 stride 不一致」的非法包（BEN validator 直接拒绝）。
+            {
+                int fmtSize[12] = {4,2,1,1,2,2,1,1,2,2,4,4};
+                auto* compInfo = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(cid).c_str());
+                auto* cattrs0 = get(compInfo, "attributes");
+                int off[3] = {0,0,0};
+                if (cJSON_IsArray(cattrs0)) for (auto* a = cattrs0->child; a; a = a->next) {
+                    if (cJSON_GetArraySize(a) < 4) continue;
+                    int sem = cJSON_GetArrayItem(a, 0)->valueint, fmt = cJSON_GetArrayItem(a, 1)->valueint;
+                    int dim = cJSON_GetArrayItem(a, 2)->valueint, st = cJSON_GetArrayItem(a, 3)->valueint;
+                    if (st < 0 || st > 2 || fmt < 0 || fmt > 11) continue;
+                    if (sem == 12 || sem == 13) continue; // 蒙皮属性统一追加
+                    off[st] += fmtSize[fmt] * dim;
+                }
+                const int t0 = off[0] ? off[0] : s0;
+                const int t1 = off[1] ? off[1] : s1;
+                if (t0 != s0 || t1 != s1) {
+                    auto repack = [](const vector<uint8_t>& src, int from, int to, int count) {
+                        vector<uint8_t> out((size_t)count * (size_t)to, 0);
+                        const int copy = std::min(from, to);
+                        for (int v = 0; v < count; v++)
+                            memcpy(&out[(size_t)v * to], &src[(size_t)v * from], (size_t)copy);
+                        return out;
+                    };
+                    if (t0 != s0) vb0 = repack(vb0, s0, t0, nv);
+                    if (t1 != s1) vb1 = repack(vb1, s1, t1, nv);
+                    cout << "repack comp " << mid << ": stream0 " << s0 << "->" << t0
+                         << ", stream1 " << s1 << "->" << t1 << "\n";
+                    s0 = t0; s1 = t1;
+                }
+            }
+
             vector<uint8_t> skin(nv * 12);
             vector<cJSON*> jbones;
             map<pair<int,int>, int> pal;
@@ -2003,16 +2043,23 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             // catalog 的 attributes 可能缺失（1.7.x 的 VFS 回填只给 components 布局），
             // 直接解引用会崩；缺失时退化为不写 catalog 属性，仅保留下面强制补的两条。
             cJSON* cattrs = get(comp, "attributes");
+            set<int> seenSem;
             if (cJSON_IsArray(cattrs)) for (auto* a = cattrs->child; a; a = a->next) {
                 if (cJSON_GetArraySize(a) < 4) continue;
                 int sem = a->child->valueint, fmt = a->child->next->valueint, dim = a->child->next->next->valueint, stream = a->child->next->next->next->valueint;
                 if (stream < 0 || stream > 2) continue;
                 if (fmt < 0 || fmt > 11) continue;
+                // 蒙皮属性统一由下面追加：validator 要求 BLENDWEIGHTS 紧跟 BLENDINDICES
+                // 且位于 stream 2 末尾，catalog 的顺序未必满足。
+                if (sem == 12 || sem == 13) continue;
+                if (seenSem.count(sem)) continue;
                 cJSON* x = jarr(); jadd(x, jnum(sem)); jadd(x, jnum(fmt)); jadd(x, jnum(dim)); jadd(x, jnum(stream)); jadd(x, jnum(offs[stream]));
                 jadd(jattrs, x); offs[stream] += fsz[fmt] * dim;
+                seenSem.insert(sem);
             }
-            cJSON* sx = jarr(); jadd(sx, jnum(12)); jadd(sx, jnum(4)); jadd(sx, jnum(4)); jadd(sx, jnum(2)); jadd(sx, jnum(0)); jadd(jattrs, sx);
-            sx = jarr(); jadd(sx, jnum(13)); jadd(sx, jnum(6)); jadd(sx, jnum(4)); jadd(sx, jnum(2)); jadd(sx, jnum(8)); jadd(jattrs, sx);
+            // 只有 catalog 没给蒙皮属性时才补；否则会与自带属性重复，validator 会拒绝。
+            if (!seenSem.count(12)) { cJSON* sx = jarr(); jadd(sx, jnum(12)); jadd(sx, jnum(4)); jadd(sx, jnum(4)); jadd(sx, jnum(2)); jadd(sx, jnum(offs[2])); jadd(jattrs, sx); offs[2] += 8; }
+            if (!seenSem.count(13)) { cJSON* sx = jarr(); jadd(sx, jnum(13)); jadd(sx, jnum(6)); jadd(sx, jnum(4)); jadd(sx, jnum(2)); jadd(sx, jnum(offs[2])); jadd(jattrs, sx); offs[2] += 4; }
 
             int pvb0 = addPayload(vb0), pvb1 = addPayload(vb1), pskin = addPayload(skin), pib = addPayload(ib);
             // textures for this component
@@ -2100,6 +2147,48 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
         }
         cJSON_AddItemToObject(japp, "components", jac); jadd(japps, japp);
 
+        bool emit11 = g_emitOptions && !optionGroups.empty();
+        if (emit11) {
+            // 1.1 的 attributes 必须与三条流 stride 严格吻合；catalog 缺 attributes 时
+            // 无法合成合法声明，宁可不发 1.1，也不写出会被 validator 拒绝的包。
+            for (auto& kv : meshIndex) {
+                auto* c = cJSON_GetObjectItemCaseSensitive(cat.comps, to_string(kv.first).c_str());
+                auto* a = get(c, "attributes");
+                if (!cJSON_IsArray(a) || cJSON_GetArraySize(a) == 0) {
+                    cout << "emit-options: component " << kv.first
+                         << " has no catalog attributes; staying on BEM 1.0\n";
+                    emit11 = false;
+                    break;
+                }
+            }
+            if (emit11) {
+                // validator 要求 stream stride == 属性按格式累加出来的偏移；
+                // mod 的 VB stride 与 catalog 布局不一致时说明布局对不上，不硬发 1.1。
+                const int sizes[12] = {4,2,1,1,2,2,1,1,2,2,4,4};
+                for (auto* mesh = jmeshes->child; mesh; mesh = mesh->next) {
+                    int off[3] = {0, 0, 0};
+                    auto* attrs = get(mesh, "attributes");
+                    if (cJSON_IsArray(attrs)) for (auto* a = attrs->child; a; a = a->next) {
+                        if (cJSON_GetArraySize(a) < 5) continue;
+                        int fmt = cJSON_GetArrayItem(a, 1)->valueint;
+                        int dim = cJSON_GetArrayItem(a, 2)->valueint;
+                        int st = cJSON_GetArrayItem(a, 3)->valueint;
+                        if (st >= 0 && st < 3 && fmt >= 0 && fmt < 12) off[st] += sizes[fmt] * dim;
+                    }
+                    auto* streams = get(mesh, "streams");
+                    for (int i = 0; i < 3 && cJSON_IsArray(streams); i++) {
+                        auto* s = cJSON_GetArrayItem(streams, i);
+                        if (s && jint(s, "stride") != off[i]) {
+                            cout << "emit-options: stream " << i << " stride " << jint(s, "stride")
+                                 << " != attribute layout " << off[i] << "; staying on BEM 1.0\n";
+                            emit11 = false;
+                            break;
+                        }
+                    }
+                    if (!emit11) break;
+                }
+            }
+        }
         cJSON* mroot = obj(nullptr);
         cJSON_AddNumberToObject(mroot, "schema", 1);
         cJSON_AddStringToObject(mroot, "package_id", ("c4ben." + string(cat.character)).c_str());
@@ -2115,6 +2204,133 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
         cJSON_AddStringToObject(mroot, "default_appearance_id", "default");
         cJSON_AddItemToObject(mroot, "appearances", japps);
 
+        // ---------- BEM 1.1：组合选项（--emit-options）----------
+        if (emit11) {
+            cJSON_DeleteItemFromObject(mroot, "default_appearance_id");
+            cJSON_DeleteItemFromObject(mroot, "appearances");
+            cJSON_DeleteItemFromObject(mroot, "required_capabilities");
+            cJSON* caps11 = jarr();
+            for (auto s : {"native-materials", "palette-u8", "indices-u32", "composable-options"}) jadd(caps11, jstrv(s));
+            cJSON_AddItemToObject(mroot, "required_capabilities", caps11);
+
+            // 1.1 的索引挂在 draw 上；本转换器每个 mesh 只有一条 draw，直接搬过去。
+            for (auto* mesh = jmeshes->child; mesh; mesh = mesh->next) {
+                auto* draws = get(mesh, "draws");
+                auto* idx = get(mesh, "indices");
+                auto* cnt = get(mesh, "index_count");
+                if (cJSON_IsArray(draws) && cJSON_GetArraySize(draws) == 1 && idx && cnt) {
+                    auto* d0 = cJSON_GetArrayItem(draws, 0);
+                    // 1.0 的 draw 已经带 start/count，直接再加会重复键；先删再写。
+                    cJSON_DeleteItemFromObject(d0, "start");
+                    cJSON_DeleteItemFromObject(d0, "count");
+                    cJSON_DeleteItemFromObject(d0, "indices");
+                    cJSON_AddItemToObject(d0, "indices", cJSON_Duplicate(idx, 1));
+                    cJSON_AddItemToObject(d0, "count", cJSON_Duplicate(cnt, 1));
+                    cJSON_DeleteItemFromObject(mesh, "indices");
+                    cJSON_DeleteItemFromObject(mesh, "index_count");
+                }
+            }
+
+            map<string, string> gidOf;                // $swapvar_x -> group id
+            map<string, map<int, string>> choiceOf;   // group id -> value -> choice id
+            cJSON* jgroups = jarr();
+            for (size_t gi = 0; gi < optionGroups.size(); gi++) {
+                string gid = optionGroups[gi].first;
+                if (!gid.empty() && gid[0] == '$') gid.erase(0, 1);
+                for (auto& ch : gid) if (!(isalnum((unsigned char)ch) || ch == '_' || ch == '.' || ch == '-')) ch = '_';
+                while (!gid.empty() && !isalnum((unsigned char)gid[0])) gid.erase(0, 1);
+                while (!gid.empty() && gid.back() == '_') gid.pop_back();
+                if (gid.empty()) gid = "group" + to_string(gi);
+                gidOf[optionGroups[gi].first] = gid;
+                cJSON* g = obj(nullptr);
+                cJSON_AddStringToObject(g, "id", gid.c_str());
+                cJSON_AddStringToObject(g, "name", gid.c_str());
+                cJSON* jch = jarr();
+                string def;
+                for (int v : optionGroups[gi].second) {
+                    const string cidv = (v >= 0) ? ("v" + to_string(v)) : ("vm" + to_string(-v));
+                    cJSON* c = obj(nullptr);
+                    cJSON_AddStringToObject(c, "id", cidv.c_str());
+                    cJSON_AddStringToObject(c, "name", cidv.c_str());
+                    jadd(jch, c);
+                    choiceOf[gid][v] = cidv;
+                    if (def.empty() || v == 0) def = cidv; // EFMI 的 persist 默认通常是 0
+                }
+                if (def.empty() && !optionGroups[gi].second.empty())
+                    def = choiceOf[gid][optionGroups[gi].second[0]];
+                cJSON_AddStringToObject(g, "default", def.c_str());
+                cJSON_AddItemToObject(g, "choices", jch);
+                jadd(jgroups, g);
+            }
+            cJSON_AddItemToObject(mroot, "option_groups", jgroups);
+
+            // 组件 -> 条件（用模组组件 hash 反查 $draw_* 条件）
+            map<int, vector<EfmiDrawCond>> cidConds;
+            for (auto& kv : mod2cat) {
+                auto h = midHash.find(kv.first);
+                if (h == midHash.end()) continue;
+                auto dc = drawConds.find(h->second);
+                if (dc == drawConds.end() || dc->second.empty()) continue;
+                if (!cidConds.count(kv.second)) cidConds[kv.second] = dc->second;
+            }
+
+            cJSON* jrules = jarr();
+            for (size_t ti = 0; ti < cat.ids.size(); ti++) {
+                const int cid = cat.ids[ti];
+                cJSON* rule = obj(nullptr);
+                cJSON_AddNumberToObject(rule, "target", (int)ti);
+                cJSON* cands = jarr();
+                auto mi = meshIndex.find(cid);
+                bool gated = false;
+                if (mi != meshIndex.end()) {
+                    auto ci = cidConds.find(cid);
+                    if (ci != cidConds.end()) {
+                        for (auto& cond : ci->second) {
+                            auto gk = gidOf.find(cond.group);
+                            if (gk == gidOf.end()) continue;
+                            auto& byVal = choiceOf[gk->second];
+                            auto vk = byVal.find(cond.value);
+                            if (vk == byVal.end()) continue;
+                            cJSON* c1 = obj(nullptr);
+                            cJSON* when = obj(nullptr);
+                            cJSON* eq = jarr(); jadd(eq, jstrv(gk->second)); jadd(eq, jstrv(vk->second));
+                            cJSON_AddItemToObject(when, "eq", eq);
+                            cJSON_AddItemToObject(c1, "when", when);
+                            cJSON_AddStringToObject(c1, "operation", "replace");
+                            cJSON_AddNumberToObject(c1, "mesh", mi->second);
+                            jadd(cands, c1);
+
+                            cJSON* c2 = obj(nullptr);
+                            cJSON* neg = obj(nullptr); cJSON* inner = obj(nullptr);
+                            cJSON* eq2 = jarr(); jadd(eq2, jstrv(gk->second)); jadd(eq2, jstrv(vk->second));
+                            cJSON_AddItemToObject(inner, "eq", eq2);
+                            cJSON_AddItemToObject(neg, "not", inner);
+                            cJSON_AddItemToObject(c2, "when", neg);
+                            cJSON_AddStringToObject(c2, "operation", "keep");
+                            jadd(cands, c2);
+                            gated = true;
+                            break;
+                        }
+                    }
+                }
+                if (!gated) {
+                    cJSON* c = obj(nullptr);
+                    if (mi != meshIndex.end()) {
+                        cJSON_AddStringToObject(c, "operation", "replace");
+                        cJSON_AddNumberToObject(c, "mesh", mi->second);
+                    } else {
+                        cJSON_AddStringToObject(c, "operation", "keep");
+                    }
+                    jadd(cands, c);
+                }
+                cJSON_AddItemToObject(rule, "candidates", cands);
+                jadd(jrules, rule);
+            }
+            cJSON_AddItemToObject(mroot, "component_rules", jrules);
+            cout << "emitting BEM 1.1: " << cJSON_GetArraySize(jgroups) << " option group(s), "
+                 << cJSON_GetArraySize(jrules) << " component rule(s)\n";
+        }
+
         char* json = cJSON_PrintUnformatted(mroot);
         if (!json) throw runtime_error("manifest serialize failed");
         vector<uint8_t> manifest((uint8_t*)json, (uint8_t*)json + strlen(json));
@@ -2126,7 +2342,7 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             es.push_back({nm, payloads[i], 0, 0});
         }
         if (out.size() >= 4 && string(out).substr(string(out).size() - 4) == ".zip") writeZip(out, es);
-        else writeBem(out, manifest, payloads);
+        else writeBem(out, manifest, payloads, emit11 ? 1 : 0);
         cout << "written " << out << ": meshes=" << cJSON_GetArraySize(jmeshes) << " textures=" << cJSON_GetArraySize(jtextures) << " payloads=" << payloads.size() << "\n";
         cJSON_Delete(mroot); cJSON_Delete(cat.root);
         return 0;
@@ -2539,6 +2755,7 @@ int main(int argc, char** argv) {
             else if (a == "--texture-fingerprint") g_textureFingerprint = true;
             else if (a == "--auto-entries") g_autoEntries = true;
             else if (a == "--option-report" && i + 1 < argc) g_optionReport = argv[++i];
+            else if (a == "--emit-options") g_emitOptions = true;
             else if (a == "--compat-layout") g_compatLayout = true;
             else if (a == "--compat-bones") g_compatBones = true;
             else if (a == "--skeleton" && i + 1 < argc) skeletonPath = argv[++i];
