@@ -33,6 +33,7 @@
 using namespace std;
 static bool g_textureFingerprint = false;
 static bool g_autoEntries = false; // --auto-entries：布局-only catalog 的唯一指纹锚定
+static string g_optionReport;      // --option-report <file>：EFMI 选项/组件条件导出
 // 显式开启的旧布局兼容：源 VB 缺少目标尾部顶点属性时补零，而不是直接拒绝。
 // 只允许 source stride < target stride；不做删除/重排，避免静默猜布局。
 static bool g_compatLayout = false;
@@ -1589,6 +1590,47 @@ static int applyIdentities(Cat& cat) {
     return applied;
 }
 
+// EFMI 把「变体 → 组件」的条件写成常量：
+//   $draw_component_2_ba3f54e3_mask = ($swapvar_toggle_0 == 0)
+// 解析出来即可知道每个组件在哪个组、取哪个值时被绘制。
+struct EfmiDrawCond { string group; int value = 0; };
+static map<string, vector<EfmiDrawCond>> parseEfmiDrawConditions(const Ini& ini) {
+    map<string, vector<EfmiDrawCond>> out; // component hash -> conditions
+    for (auto& s : ini.order) {
+        auto it = ini.sec.find(s);
+        if (it == ini.sec.end()) continue;
+        for (auto& kv : it->second) {
+            if (kv.first.rfind("$draw_", 0) != 0) continue;
+            // 变量名里带 8 位组件 hash：$draw_component_<n>_<hash>...
+            string hash;
+            size_t pos = 0;
+            while ((pos = kv.first.find('_', pos)) != string::npos) {
+                const string cand = kv.first.substr(pos + 1, 8);
+                if (cand.size() == 8 && cand.find_first_not_of("0123456789abcdefABCDEF") == string::npos) { hash = lower(cand); break; }
+                pos++;
+            }
+            if (hash.empty()) continue;
+            // 条件形如 ($swapvar_x == 0)
+            const string& v = kv.second;
+            const size_t eq = v.find("==");
+            if (eq == string::npos) continue;
+            string group = v.substr(0, eq);
+            const size_t gs = group.find("$swapvar");
+            if (gs == string::npos) continue;
+            group = group.substr(gs);
+            while (!group.empty() && !isalnum((unsigned char)group[0]) && group[0] != '$') group.erase(group.begin());
+            for (auto& ch : group) if (!(isalnum((unsigned char)ch) || ch == '_' || ch == '$')) ch = '_';
+            while (!group.empty() && group.back() == '_') group.pop_back();
+            const int value = atoi(v.c_str() + eq + 2);
+            auto& bucket = out[hash];
+            bool dup = false;
+            for (auto& c : bucket) if (c.group == group && c.value == value) { dup = true; break; }
+            if (!dup) bucket.push_back({group, value});
+        }
+    }
+    return out;
+}
+
 // EFMI option surfaces (KeySwap/KeyToggle) are detected but not yet mapped to
 // BEM 1.1 option_groups. Report them instead of silently collapsing to one state.
 static vector<pair<string, vector<int>>> detectEfmiOptions(const Ini& ini) {
@@ -1699,13 +1741,49 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
             throw runtime_error("not an EFMI model package (no TextureOverride_Component entry points)");
         }
         auto optionGroups = detectEfmiOptions(ini);
+        auto drawConds = parseEfmiDrawConditions(ini);
         if (!optionGroups.empty()) {
-            cout << "options detected: " << optionGroups.size() << " groups (BEM option_groups mapping not implemented yet)\n";
+            cout << "options detected: " << optionGroups.size() << " groups, "
+                 << drawConds.size() << " component binding(s) (BEM option_groups 输出尚未实现)\n";
             for (auto& g : optionGroups) {
                 cout << "  " << g.first << ":";
                 for (int v : g.second) cout << " " << v;
                 cout << "\n";
             }
+            for (auto& kv : drawConds) {
+                cout << "    component " << kv.first << " drawn when";
+                for (auto& c : kv.second) cout << " " << c.group << "==" << c.value;
+                cout << "\n";
+            }
+        }
+        if (!g_optionReport.empty()) {
+            cJSON* rep = obj(nullptr);
+            cJSON* jg = jarr();
+            for (auto& g : optionGroups) {
+                cJSON* x = obj(nullptr);
+                cJSON_AddStringToObject(x, "id", g.first.c_str());
+                cJSON* ch = jarr();
+                for (int v : g.second) jadd(ch, jnum(v));
+                cJSON_AddItemToObject(x, "values", ch);
+                jadd(jg, x);
+            }
+            cJSON_AddItemToObject(rep, "groups", jg);
+            cJSON* jc = obj(nullptr);
+            for (auto& kv : drawConds) {
+                cJSON* arr = jarr();
+                for (auto& c : kv.second) {
+                    cJSON* w = obj(nullptr);
+                    cJSON_AddStringToObject(w, "group", c.group.c_str());
+                    cJSON_AddNumberToObject(w, "value", c.value);
+                    jadd(arr, w);
+                }
+                cJSON_AddItemToObject(jc, kv.first.c_str(), arr);
+            }
+            cJSON_AddItemToObject(rep, "component_draw_conditions", jc);
+            char* js = cJSON_PrintUnformatted(rep);
+            if (js) { writeFile(g_optionReport, vector<uint8_t>(js, js + strlen(js))); free(js); }
+            cJSON_Delete(rep);
+            cout << "option report written: " << g_optionReport << "\n";
         }
         vector<string> hashes;
         for (auto& s : ini.order) {
@@ -2460,6 +2538,7 @@ int main(int argc, char** argv) {
             else if (a == "--legacy-auto") legacyAuto = true;
             else if (a == "--texture-fingerprint") g_textureFingerprint = true;
             else if (a == "--auto-entries") g_autoEntries = true;
+            else if (a == "--option-report" && i + 1 < argc) g_optionReport = argv[++i];
             else if (a == "--compat-layout") g_compatLayout = true;
             else if (a == "--compat-bones") g_compatBones = true;
             else if (a == "--skeleton" && i + 1 < argc) skeletonPath = argv[++i];
