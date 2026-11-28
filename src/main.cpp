@@ -228,9 +228,19 @@ static void applyTextureCompression(Dds& d, const string& hint) {
         cerr << "texture-compress skipped (mips=" << d.mips << "): " << hint << "\n";
         return;
     }
-    // BC1 对法线双通道精度损失太大；第一版宁可不压，等 BC5 编码器。
+    // 法线类贴图：BC1 双通道精度不够，第一版用 BC5（R/G 两个 BC4 通道块）。
     if (normalLikeName(hint)) {
-        cerr << "texture-compress skipped (normal-like; needs BC5): " << hint << "\n";
+        try {
+            vector<uint8_t> out;
+            const size_t before = d.data.size();
+            int fmt = c4ben_bc::encodeRgbaBc5(d.data, d.w, d.h, d.mips, out);
+            d.data.swap(out);
+            d.fmt = fmt;
+            cerr << "texture compress: BC5 " << before << " -> " << d.data.size()
+                 << " bytes (normal-like: " << hint << ")\n";
+        } catch (exception& e) {
+            cerr << "texture compress skipped (BC5 failed): " << e.what() << "\n";
+        }
         return;
     }
     bool hasAlpha = false;

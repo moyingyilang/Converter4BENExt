@@ -50,9 +50,9 @@ static void encodeBc1Block(const uint8_t px[16][4], uint8_t out[8]) {
     for (int i = 0; i < 4; i++) out[4 + i] = (uint8_t)((idx >> (8 * i)) & 255);
 }
 
-static void encodeBc4Block(const uint8_t px[16][4], uint8_t out[8]) {
+static void encodeBc4Block(const uint8_t px[16][4], uint8_t out[8], int channel = 3) {
     int amin = 255, amax = 0;
-    for (int i = 0; i < 16; i++) { amin = std::min(amin, (int)px[i][3]); amax = std::max(amax, (int)px[i][3]); }
+    for (int i = 0; i < 16; i++) { amin = std::min(amin, (int)px[i][channel]); amax = std::max(amax, (int)px[i][channel]); }
     if (amin == amax) {
         out[0] = out[1] = (uint8_t)amax;
         for (int i = 2; i < 8; i++) out[i] = 0;
@@ -67,9 +67,9 @@ static void encodeBc4Block(const uint8_t px[16][4], uint8_t out[8]) {
     }
     uint64_t bits = 0;
     for (int i = 0; i < 16; i++) {
-        int best = 0, bestd = std::abs((int)px[i][3] - pal[0]);
+        int best = 0, bestd = std::abs((int)px[i][channel] - pal[0]);
         for (int k = 1; k < 8; k++) {
-            int d = std::abs((int)px[i][3] - pal[k]);
+            int d = std::abs((int)px[i][channel] - pal[k]);
             if (d < bestd) { bestd = d; best = k; }
         }
         bits |= ((uint64_t)best) << (3 * i);
@@ -110,6 +110,31 @@ static inline int encodeRgba(const std::vector<uint8_t>& rgba, int w, int h, int
     if (rgba.size() < need) throw std::runtime_error("bc_encode: RGBA payload shorter than mip chain");
     encodeBlocks(rgba, w, h, mips, alpha, out);
     return alpha ? 12 : 10;
+}
+
+// BC5：两个 BC4 通道块（R/G），用于法线类贴图。BEM fmt=27，16B/块。
+static inline int encodeRgbaBc5(const std::vector<uint8_t>& rgba, int w, int h, int mips, std::vector<uint8_t>& out) {
+    size_t need = 0;
+    for (int m = 0; m < mips; m++) need += (size_t)std::max(1, w >> m) * std::max(1, h >> m) * 4;
+    if (rgba.size() < need) throw std::runtime_error("bc_encode: RGBA payload shorter than mip chain");
+    out.clear();
+    for (int m = 0; m < mips; m++) {
+        int mw = std::max(1, w >> m), mh = std::max(1, h >> m);
+        int bw = (mw + 3) / 4, bh = (mh + 3) / 4;
+        for (int by = 0; by < bh; by++) for (int bx = 0; bx < bw; bx++) {
+            uint8_t px[16][4];
+            for (int py = 0; py < 4; py++) for (int pxx = 0; pxx < 4; pxx++) {
+                int x = std::min(bx * 4 + pxx, mw - 1), y = std::min(by * 4 + py, mh - 1);
+                const uint8_t* s = &rgba[((size_t)y * mw + x) * 4];
+                for (int k = 0; k < 4; k++) px[py * 4 + pxx][k] = s[k];
+            }
+            uint8_t blk[16];
+            encodeBc4Block(px, blk, 0);
+            encodeBc4Block(px, blk + 8, 1);
+            out.insert(out.end(), blk, blk + 16);
+        }
+    }
+    return 27;
 }
 
 }
