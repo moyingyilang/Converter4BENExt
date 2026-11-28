@@ -2108,7 +2108,15 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
                     name = catalogTextureByDescriptor(cat.textures, d.w, d.h, d.mips);
                     if (!name.empty()) cout << "texture fingerprint: " << hash << " -> " << name << "\n";
                 }
-                if (name.empty()) continue;
+                // 以前这里是裸 continue：贴图被静默丢弃，日志里看不到任何痕迹，
+                // 与 EFF 路径的 "no catalog identity" 诊断不一致。现在显式报告并给出下一步。
+                if (name.empty()) {
+                    cerr << "texture skip: " << hash << " has no catalog identity"
+                         << (g_textureFingerprint ? " (descriptor match failed)"
+                                                  : " (retry with --texture-fingerprint)")
+                         << "\n";
+                    continue;
+                }
                 texRes[hash] = {name, d};
             } catch (exception& e) { cerr << "texture skip " << it->second << ": " << e.what() << "\n"; }
         }
@@ -2133,7 +2141,15 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
                     name = catalogTextureByDescriptor(cat.textures, d.w, d.h, d.mips);
                     if (!name.empty()) cout << "texture fingerprint: " << hash << " -> " << name << "\n";
                 }
-                if (name.empty()) continue;
+                // 以前这里是裸 continue：贴图被静默丢弃，日志里看不到任何痕迹，
+                // 与 EFF 路径的 "no catalog identity" 诊断不一致。现在显式报告并给出下一步。
+                if (name.empty()) {
+                    cerr << "texture skip: " << hash << " has no catalog identity"
+                         << (g_textureFingerprint ? " (descriptor match failed)"
+                                                  : " (retry with --texture-fingerprint)")
+                         << "\n";
+                    continue;
+                }
                 texRes[hash] = {name, d};
             } catch (exception& e) { cerr << "texture skip " << it->second << ": " << e.what() << "\n"; }
         }
