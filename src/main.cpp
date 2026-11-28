@@ -808,6 +808,17 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     // 先决定目标/部件，再逐个目标合并
     set<int> hiddenTargets;
     set<int> keptTargets;
+    {   // 目标处理方式汇总：keep/hide 的目标不转换几何，也不应用其贴图/材质编辑。
+        // 此前这类目标完全静默观察不到，作者容易误以为 keep 组件的贴图也被处理了。
+        size_t nK = 0, nH = 0, nR = 0;
+        for (auto& rk : replaceKeys) {
+            const string h = effKey(ini, rk, "handling");
+            if (h == "keep") ++nK; else if (h == "hide") ++nH; else if (h != "skip") ++nR;
+        }
+        if (nK || nH) cout << "targets: replace=" << nR << " keep=" << nK << " hide=" << nH
+                           << "（keep/hide 不转换几何，也不应用其贴图与材质编辑）\n";
+    }
+
     for (auto& rkey : replaceKeys) {
         const string handling = effKey(ini, rkey, "handling");
         string targetAsset = effKey(ini, rkey, "target.asset");
@@ -821,7 +832,6 @@ static int convertEff(const string& dir, const string& catDir, const string& out
         if (cid < 0) { cout << "skip replace " << rkey << ": no catalog component for " << targetAsset << "\n"; continue; }
         auto parts = effSplit(effKey(ini, rkey, "parts"), ',');
         if (parts.empty()) { cout << "skip replace " << rkey << ": no parts\n"; continue; }
-
         // Pre-scan parts: the merged BEM mesh needs one attribute layout, so use
         // the union of authored UV sets (UV0..UV7) and colour presence.
         map<string,EffMesh> meshCache;

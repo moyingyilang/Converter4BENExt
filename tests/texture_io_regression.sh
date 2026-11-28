@@ -20,6 +20,17 @@ run_case(){
   echo "PASS $name meshes=$n"; pass=$((pass+1))
 }
 run_case si-7z "$ROOT/.work/bem-mods3/732494_si_v10_ca9ce.7z" 14 --auto-entries
+# 防回归：SI 有贴图缺 catalog 身份，诊断必须可见。
+# （EFMI 路径曾用裸 continue 静默丢弃，日志里一条都没有；这里锁住"至少报一条"。）
+if [ -f "$TMP/si-7z.log" ]; then
+  n_skip=$(grep -c 'has no catalog identity' "$TMP/si-7z.log" 2>/dev/null || true)
+  n_skip=${n_skip:-0}
+  if [ "$n_skip" -ge 1 ]; then
+    echo "PASS si-7z texture-skip diagnostics ($n_skip 条)"; pass=$((pass+1))
+  else
+    echo "FAIL si-7z texture-skip diagnostics: 0 条（贴图又被静默丢弃了）"; fail=$((fail+1))
+  fi
+fi
 run_case yif-eff3 "$ROOT/.work/bem-mods3/745092_yif.zip" 4 --auto-entries
 run_case si-bc "$ROOT/.work/bem-mods3/732494_si_v10_ca9ce.7z" 14 --auto-entries --texture-compress
 run_case argent-rabbitfx "$ROOT/.work/bem-mods3/744828_argent_flow.rar" 6 \
