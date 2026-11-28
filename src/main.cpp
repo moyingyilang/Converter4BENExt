@@ -2319,8 +2319,12 @@ static int convertEfmi(const string& dir, const string& catDir, const string& ou
                     cJSON_AddItemToObject(d0, "indices", cJSON_Duplicate(idx, 1));
                     cJSON_AddItemToObject(d0, "count", cJSON_Duplicate(cnt, 1));
                     cJSON_DeleteItemFromObject(mesh, "indices");
-                    // 保留 mesh.index_count：BEN native validator 在 1.1 仍要求该字段用于
-                    // 校验 indices payload 的长度；draw 级 count 是额外索引，不冲突。
+                    // 保留 mesh 级 index_count：BEN Rust 校验器（native/bem/src/lib.rs:346）
+                    // 无条件要求它；bem_tool.py 的 1.1 路径不要求、但多余字段不校验。
+                    // 保留后 Rust 能读 index_count、又因 mesh.indices 已删除而跳过长度检查；
+                    // draw 级 indices/count 继续输出，因此两份校验器都满足。
+                    // 注意 BEM_V1_1_SPEC 说「不再用网格级 indices 和固定 index_count」，
+                    // 这里保留 index_count 是实测兼容取舍，不是重新引入 mesh.indices。
                 }
             }
 
