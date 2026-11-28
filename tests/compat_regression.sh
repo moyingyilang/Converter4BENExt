@@ -4,7 +4,7 @@ set -u
 ROOT=${ROOT:-/data/data/com.termux/files/home}
 C4=${C4:-$ROOT/Converter4BENeXt/build/c4ben}
 CAT=${CAT:-$ROOT/.work/runtime-catalog/catalog-entries}
-BEM=${BEM:-$ROOT/BEN/Better-Endfield-Next-mod-ForTMR4A/native/bem/target/debug/be-bem}
+BEM=${BEM:-$ROOT/BEN/Better-Endfield-Next-mod-ForTMR4A/native/bem/target/release/be-bem}
 TMP=${TMP:-$ROOT/.work/compat-regression}
 mkdir -p "$TMP"
 pass=0; fail=0; skip=0
