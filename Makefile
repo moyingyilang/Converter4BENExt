@@ -2,7 +2,7 @@ CXX ?= clang++
 CC ?= clang
 CXXFLAGS ?= -O2 -std=c++17 -Wall -Wextra -Wno-unused-parameter -Isrc/third_party
 CFLAGS ?= -O2 -std=c11 -Isrc/third_party
-LDFLAGS ?= -lz
+LDFLAGS ?= -lz -larchive
 BIN = build/c4ben
 LIB = build/libc4ben.a
 OBJ = build/main.o build/cJSON.o

@@ -16,6 +16,11 @@
 #include <unordered_map>
 #include <vector>
 #include <zlib.h>
+#if __has_include(<archive.h>)
+#include <archive.h>
+#include <archive_entry.h>
+#define C4BEN_HAVE_LIBARCHIVE 1
+#endif
 #define BCDEC_IMPLEMENTATION
 #define BCDEC_STATIC
 #include "bcdec.h"
@@ -2007,8 +2012,70 @@ static string unzipTo(const string& zipPath, const string& outDir) {
     return modIniDir; // 可能是 ""（mod.ini 在根）
 }
 
-static string g_extractedRoot; // 进程结束前清理的解压目录
+#ifdef C4BEN_HAVE_LIBARCHIVE
+// 7z / rar（含 RAR5）走 libarchive（BSD-2，可同时读两种格式）。
+// 解压语义与 zip 路径一致：拒绝越界条目、精确匹配 mod.ini、重复则报歧义。
+static string unarchiveTo(const string& path, const string& outDir) {
+    struct archive* a = archive_read_new();
+    if (!a) throw runtime_error("archive_read_new failed");
+    archive_read_support_filter_all(a);
+    archive_read_support_format_all(a);
+    if (archive_read_open_filename(a, path.c_str(), 1 << 16) != ARCHIVE_OK) {
+        const string msg = archive_error_string(a) ? archive_error_string(a) : "unknown error";
+        archive_read_free(a);
+        throw runtime_error("archive open failed: " + path + ": " + msg);
+    }
 
+    vector<string> modIniHits;
+    string modIniDir;
+    struct archive_entry* e = nullptr;
+    vector<char> buf(1 << 16);
+    while (archive_read_next_header(a, &e) == ARCHIVE_OK) {
+        const char* pn = archive_entry_pathname(e);
+        if (!pn) { archive_read_data_skip(a); continue; }
+        string name = pn;
+        for (auto& ch : name) if (ch == '\\') ch = '/';
+        // 只解普通文件：目录、符号链接、设备等一律跳过（避免符号链接穿越）
+        if (archive_entry_filetype(e) != AE_IFREG) { archive_read_data_skip(a); continue; }
+        if (!name.empty() && name.back() == '/') { archive_read_data_skip(a); continue; }
+        if (name.find("..") != string::npos) { archive_read_free(a); throw runtime_error("archive: refusing entry with '..': " + name); }
+        if (!name.empty() && name[0] == '/') { archive_read_free(a); throw runtime_error("archive: refusing absolute entry: " + name); }
+        if (name.size() > 1 && name[1] == ':') { archive_read_free(a); throw runtime_error("archive: refusing drive-letter entry: " + name); }
+
+        const string dest = outDir + "/" + name;
+        fs::create_directories(fs::path(dest).parent_path());
+        ofstream f(dest, ios::binary);
+        if (!f) { archive_read_free(a); throw runtime_error("write failed: " + dest); }
+        for (;;) {
+            const la_ssize_t n = archive_read_data(a, buf.data(), buf.size());
+            if (n > 0) f.write(buf.data(), (streamsize)n);
+            else if (n == 0) break;
+            else { archive_read_free(a); throw runtime_error("archive: read data failed for " + name); }
+        }
+        f.close();
+
+        const string ln = lower(name);
+        if (ln.size() >= 7 && ln.compare(ln.size() - 7, 7, "mod.ini") == 0) {
+            const size_t slash = name.find_last_of('/');
+            const string base = slash == string::npos ? name : name.substr(slash + 1);
+            if (lower(base) == "mod.ini") {
+                modIniHits.push_back(name);
+                const string dir = name.substr(0, name.size() - base.size());
+                if (modIniDir.empty() || dir.size() < modIniDir.size()) modIniDir = dir;
+            }
+        }
+    }
+    archive_read_free(a);
+    if (modIniHits.size() > 1) {
+        string list;
+        for (size_t i = 0; i < modIniHits.size() && i < 8; i++) list += "\n  " + modIniHits[i];
+        throw runtime_error("archive: mod.ini 在包内有 " + to_string(modIniHits.size()) + " 处，无法确定目标包:" + list);
+    }
+    return modIniDir;
+}
+#endif  /* C4BEN_HAVE_LIBARCHIVE */
+
+static string g_extractedRoot; // 进程结束前清理的解压目录
 static void cleanupExtracted() {
     if (g_extractedRoot.empty()) return;
     std::error_code ec;
@@ -2029,9 +2096,29 @@ static void resolveArchiveInput(string& dir) {
     vector<uint8_t> head(8);
     { ifstream f(dir, ios::binary); if (f) { f.read((char*)head.data(), (streamsize)head.size()); head.resize((size_t)f.gcount()); } }
     if (!looksLikeZip(dir, head)) {
-        if (endsWith(".rar") || endsWith(".7z"))
-            throw runtime_error("ARCHIVE_BACKEND: 此发行版不含 RAR/7z 解压后端，请提供 .zip 或已解包的目录: " + dir);
-        throw runtime_error("source must be an EFMI mod folder or .zip: " + dir);
+        const bool rar4 = head.size() >= 7 && head[0] == 'R' && head[1] == 'a' && head[2] == 'r' && head[3] == '!' &&
+                          head[4] == 0x1A && head[5] == 0x07 && head[6] == 0x00;
+        const bool rar5 = head.size() >= 8 && head[0] == 'R' && head[1] == 'a' && head[2] == 'r' && head[3] == '!' &&
+                          head[4] == 0x1A && head[5] == 0x07 && head[6] == 0x01 && head[7] == 0x00;
+        const bool sevenZ = head.size() >= 6 && head[0] == '7' && head[1] == 'z' && head[2] == 0xBC &&
+                            head[3] == 0xAF && head[4] == 0x27 && head[5] == 0x1C;
+        const bool archiveByName = endsWith(".rar") || endsWith(".7z");
+        if (rar4 || rar5 || sevenZ || archiveByName) {
+#ifdef C4BEN_HAVE_LIBARCHIVE
+            const string stamp = to_string((unsigned long long)chrono::steady_clock::now().time_since_epoch().count());
+            const string tmp = (fs::temp_directory_path() / ("c4ben-" + stamp)).string();
+            fs::create_directories(tmp);
+            g_extractedRoot = tmp;
+            const string sub = unarchiveTo(dir, tmp);
+            dir = sub.empty() ? tmp : (tmp + "/" + sub);
+            cerr << "extracted " << dir << "\n";
+            return;
+#else
+            throw runtime_error("ARCHIVE_BACKEND: 构建时未找到 libarchive，无法读取 .rar/.7z；"
+                                "请安装 libarchive 开发包后重新编译，或提供 .zip / 已解包的目录: " + dir);
+#endif
+        }
+        throw runtime_error("source must be an EFMI mod folder, .zip, .rar or .7z: " + dir);
     }
 
     const string stamp = to_string((unsigned long long)chrono::steady_clock::now().time_since_epoch().count());

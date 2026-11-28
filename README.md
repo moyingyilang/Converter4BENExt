@@ -6,7 +6,7 @@
 （EFMI / 3DMigoto 以及后续 EFF Format 3）转成 BEN 能导入的 BEM 包。
 
 - 语言：C++17（无 Python、无 .NET 运行时）
-- 依赖：clang++/gcc、zlib；cJSON 已 vendored（MIT）
+- 依赖：clang++/gcc、zlib、libarchive（`.zip` 用内置 zlib，`.rar`/`.7z` 用 libarchive）；cJSON / bcdec / stb_image 已 vendored
 - 状态：EFMI 标准 ComponentN + 合并骨架、EFF Format 3 已能出包；来源覆盖矩阵见 [`docs/COVERAGE.md`](docs/COVERAGE.md)
 
 ## 为什么只做迁移
@@ -23,7 +23,7 @@ make            # -> build/c4ben
 ## 用法
 
 ```bash
-./build/c4ben convert <解压后的mod目录> \
+./build/c4ben convert <mod目录|.zip|.rar|.7z> \
     --catalog <BEN catalog目录> \
     --out <输出.bem>
 
@@ -38,7 +38,7 @@ make            # -> build/c4ben
 ./build/c4ben convert <mod> --catalog <catalog> --identities identities.json --out <输出.bem>
 ```
 
-- `<mod目录>` 需要有 `mod.ini`（EFMI 目录/解压后的包）。
+- `<mod目录>` 需要有 `mod.ini`；也可直接传 `.zip` / `.rar` / `.7z`，包内允许带一层目录，多处 `mod.ini` 会报歧义。
 - catalog 用 BEN 仓库的 `tools/CustomModel/catalog/`（AGPL-3.0，外部提供，不随本仓库分发）。
 - 输出标准 BEM 二进制；写 `.zip` 扩展名也可以出 ZIP 容器。
 
