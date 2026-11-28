@@ -991,18 +991,8 @@ static int convertEff(const string& dir, const string& catDir, const string& out
     cJSON* caps = jarr(); for (auto s : {"native-materials","palette-u8","indices-u32"}) jadd(caps,jstrv(s));
     // minor>=1 的包必须是「组合选项」形态：需要 option_groups + component_rules，
     // 且 draw 自带 indices/count；否则 bem_v1 会报 BEM version/manifest mismatch。
-    // 1.5 的 material_overrides 需要完整的 1.1 结构（option_groups/component_rules/
-    // draw 级 indices）。EFF 的 draw 切分尚未对齐 validator，先降级为合法的 BEM 1.0，
-    // 并明确告知 overrides 未写入——不产出会被拒绝的包。
-    const bool asV11 = false;
-    if (hasMatOverrides) {
-        cout << "warning: material_overrides 需要 BEM 1.5 结构，当前降级为 1.0 并丢弃该字段\n";
-        for (auto* mesh = jmeshes->child; mesh; mesh = mesh->next)
-            for (auto* d = (get(mesh, "draws") ? get(mesh, "draws")->child : nullptr); d; d = d->next)
-                cJSON_DeleteItemFromObject(d, "material_overrides");
-        hasMatOverrides = false;
-        hasRenderState = false;
-    }
+    // 有 material_overrides 时才升级到 1.5，无 overrides 的包保持 1.0（行为不变）。
+    const bool asV11 = hasMatOverrides;
     if (asV11) {
         jadd(caps, jstrv("composable-options"));
         for (auto* mesh = jmeshes->child; mesh; mesh = mesh->next) {
@@ -1012,23 +1002,27 @@ static int convertEff(const string& dir, const string& catDir, const string& out
             const int basePayload = idx->valueint;
             if (basePayload < 0 || basePayload >= (int)payloads.size()) continue;
             const vector<uint8_t> ibytes = payloads[basePayload];
+            // 索引宽度随 mesh 的 index_size 变化（顶点数超过 65535 时是 u32），
+            // 切分必须按 index_size 字节对齐，否则 payload 长度会差 2 倍。
+            int isz = jint(mesh, "index_size");
+            if (isz != 4) isz = 2;
             for (auto* d = draws->child; d; d = d->next) {
                 int start = jint(d, "start");
                 int count = jint(d, "count");
-                if (count <= 0) count = jint(d, "index_count");
                 if (start < 0) start = 0;
-                const size_t off = std::min<size_t>((size_t)start * 2, ibytes.size());
-                const size_t len = std::min<size_t>((size_t)count * 2, ibytes.size() - off);
+                const size_t off = std::min<size_t>((size_t)start * isz, ibytes.size());
+                const size_t len = std::min<size_t>((size_t)count * isz, ibytes.size() - off);
                 vector<uint8_t> slice(ibytes.begin() + off, ibytes.begin() + off + len);
                 const int pid = addPayload(std::move(slice));
                 cJSON_DeleteItemFromObject(d, "start");
                 cJSON_DeleteItemFromObject(d, "count");
                 cJSON_DeleteItemFromObject(d, "indices");
                 cJSON_AddNumberToObject(d, "indices", pid);
-                cJSON_AddNumberToObject(d, "count", (int)(len / 2));
+                cJSON_AddNumberToObject(d, "count", (int)(len / isz));
             }
+            // mesh 级 indices 删掉（1.1+ 走 draw 级），但 index_count 必须保留：
+            // BEN native validator 在 minor>=1 仍无条件要求它。
             cJSON_DeleteItemFromObject(mesh, "indices");
-            cJSON_DeleteItemFromObject(mesh, "index_count");
         }
     } else {
         jadd(caps, jstrv("fixed-appearances"));
@@ -1077,7 +1071,7 @@ static int convertEff(const string& dir, const string& catDir, const string& out
         }
         writeZip(out, es);
     } else {
-        writeBem(out, manifest, payloads, hasMatOverrides ? 5 : 0);
+        writeBem(out, manifest, payloads, asV11 ? 5 : 0);
     }
     cout << "written " << out << ": meshes=" << cJSON_GetArraySize(jmeshes) << " textures=" << cJSON_GetArraySize(jtextures) << " payloads=" << payloads.size() << "\n";
     cJSON_Delete(mroot); cJSON_Delete(cat.root);
